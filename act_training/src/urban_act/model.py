@@ -11,7 +11,7 @@ from transformers import AutoModel
 
 @dataclass(slots=True)
 class ModelConfig:
-    image_size: int = 256
+    image_size: int = 128
     state_dim: int = 4
     action_dim: int = 3
     chunk_size: int = 20
@@ -236,4 +236,3 @@ class LanguageConditionedACT(nn.Module):
         standard_deviation = torch.exp(0.5 * log_variance)
         latent = mean + standard_deviation * torch.randn_like(standard_deviation)
         return latent, mean, log_variance
-

@@ -96,6 +96,7 @@ def run_training(
 
     train_dataset = UrbanEpisodeStream(
         train_records,
+        image_size=config.image_size,
         chunk_size=config.chunk_size,
         stride=config.train_stride,
         shuffle=True,
@@ -104,6 +105,7 @@ def run_training(
     )
     validation_dataset = UrbanEpisodeStream(
         validation_records,
+        image_size=config.image_size,
         chunk_size=config.chunk_size,
         stride=config.eval_stride,
         shuffle=True,
@@ -112,6 +114,7 @@ def run_training(
     )
     test_dataset = UrbanEpisodeStream(
         test_records,
+        image_size=config.image_size,
         chunk_size=config.chunk_size,
         stride=config.eval_stride,
         shuffle=True,

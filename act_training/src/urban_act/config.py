@@ -16,7 +16,7 @@ class TrainConfig:
     cache_dir: str = "/cache/huggingface"
     seed: int = 42
     fps: int = 10
-    image_size: int = 256
+    image_size: int = 128
     state_dim: int = 4
     action_dim: int = 3
     chunk_size: int = 20
@@ -82,4 +82,3 @@ class TrainConfig:
         for interval in (self.log_interval, self.eval_interval, self.checkpoint_interval):
             if interval < 1:
                 raise ValueError("logging, evaluation, and checkpoint intervals must be positive")
-

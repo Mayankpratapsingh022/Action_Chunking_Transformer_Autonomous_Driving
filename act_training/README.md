@@ -31,7 +31,7 @@ The model receives:
 
 | Input | Shape | Meaning |
 | --- | --- | --- |
-| Front camera | `3 x 256 x 256` | Current road scene |
+| Front camera | `3 x 128 x 128` | Current road scene, resized from the 256 x 256 source video |
 | Vehicle state | `4` | Speed, steering, previous throttle, previous brake |
 | Language instruction | Variable text | Requested driving behavior |
 
@@ -52,7 +52,7 @@ Language matters here. The first camera frame can look almost identical for "tur
 Front camera
     |
     v
-ResNet-18 feature map -------> 8 x 8 spatial vision tokens
+ResNet-18 feature map -------> 4 x 4 spatial vision tokens
 
 Vehicle state --------------> state MLP -------------> state token
 
@@ -77,7 +77,7 @@ vision + state + language + latent tokens
 
 ### Vision
 
-A pretrained ResNet-18 keeps the final spatial feature map instead of collapsing it to a single classification vector. The map becomes 64 visual tokens, which lets the transformer reason about different parts of the road image. The backbone is fine-tuned with a smaller learning rate than the policy layers.
+A pretrained ResNet-18 keeps the final spatial feature map instead of collapsing it to a single classification vector. At `128 x 128`, the map becomes 16 visual tokens. The backbone is fine-tuned with a smaller learning rate than the policy layers.
 
 ### Language
 
@@ -132,6 +132,8 @@ Training uses [`Mayank022/urban-vla-expert-v1`](https://huggingface.co/datasets/
 The driving instructions cover left, right, and straight intersection routes, traffic lights, pedestrians, slow-vehicle passing, cut-in yielding, curved-road following, and blocked-lane detours.
 
 The loader follows the supplied split assignments. It does not generate a fresh random split. This keeps held-out world seeds and instruction paraphrases out of training.
+
+The published MP4 files stay at their original `256 x 256` resolution. PyAV resizes each decoded frame directly to `128 x 128` for training. This happens in memory and does not create another dataset folder.
 
 ### Recovery and failure data
 
@@ -275,7 +277,7 @@ from urban_act.inference import ACTPolicy, RecedingHorizonController
 policy = ACTPolicy("artifacts/act-driving-v1")
 controller = RecedingHorizonController(policy, replan_interval=3)
 
-camera_rgb = np.zeros((256, 256, 3), dtype=np.uint8)
+camera_rgb = np.zeros((128, 128, 3), dtype=np.uint8)
 vehicle_state = np.array([8.2, 0.03, 0.4, 0.0], dtype=np.float32)
 instruction = "Turn left at the next intersection."
 

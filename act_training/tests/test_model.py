@@ -19,9 +19,9 @@ class DummyTextEncoder(nn.Module):
         return SimpleNamespace(last_hidden_state=self.embedding(input_ids))
 
 
-def make_model() -> LanguageConditionedACT:
+def make_model(image_size: int = 64) -> LanguageConditionedACT:
     config = ModelConfig(
-        image_size=64,
+        image_size=image_size,
         chunk_size=4,
         d_model=32,
         nhead=4,
@@ -33,7 +33,11 @@ def make_model() -> LanguageConditionedACT:
         vision_channels=16,
         pretrained_vision=False,
     )
-    vision = nn.Sequential(nn.Conv2d(3, 16, kernel_size=1), nn.AdaptiveAvgPool2d((2, 2)))
+    vision_side = image_size // 32
+    vision = nn.Sequential(
+        nn.Conv2d(3, 16, kernel_size=1),
+        nn.AdaptiveAvgPool2d((vision_side, vision_side)),
+    )
     return LanguageConditionedACT(config, text_encoder=DummyTextEncoder(16), vision_encoder=vision)
 
 
@@ -83,6 +87,18 @@ def test_inference_uses_deterministic_zero_latent() -> None:
     first = model(images, state, input_ids, attention_mask)["actions"]
     second = model(images, state, input_ids, attention_mask)["actions"]
     torch.testing.assert_close(first, second)
+
+
+def test_model_accepts_the_default_128_pixel_training_input() -> None:
+    model = make_model(image_size=128).eval()
+    images = torch.randint(0, 256, (1, 3, 128, 128), dtype=torch.uint8)
+    state = torch.randn(1, 4)
+    input_ids = torch.randint(0, 32, (1, 5))
+    attention_mask = torch.ones(1, 5, dtype=torch.long)
+
+    actions = model(images, state, input_ids, attention_mask)["actions"]
+
+    assert actions.shape == (1, 4, 3)
 
 
 def test_action_loss_ignores_padded_targets() -> None:

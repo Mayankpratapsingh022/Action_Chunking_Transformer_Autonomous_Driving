@@ -86,6 +86,7 @@ class UrbanEpisodeStream(IterableDataset[dict[str, Any]]):
         self,
         records: list[EpisodeRecord],
         *,
+        image_size: int,
         chunk_size: int,
         stride: int,
         shuffle: bool,
@@ -93,7 +94,10 @@ class UrbanEpisodeStream(IterableDataset[dict[str, Any]]):
         seed: int,
     ) -> None:
         super().__init__()
+        if image_size < 32:
+            raise ValueError("image_size must be at least 32 pixels")
         self.records = records
+        self.image_size = image_size
         self.chunk_size = chunk_size
         self.stride = stride
         self.shuffle = shuffle
@@ -145,7 +149,12 @@ class UrbanEpisodeStream(IterableDataset[dict[str, Any]]):
                 action_mask = np.zeros(self.chunk_size, dtype=np.bool_)
                 action_chunk[:valid] = actions[frame_index:end]
                 action_mask[:valid] = True
-                rgb = np.ascontiguousarray(frame.to_ndarray(format="rgb24"))
+                resized_frame = frame.reformat(
+                    width=self.image_size,
+                    height=self.image_size,
+                    format="rgb24",
+                )
+                rgb = np.ascontiguousarray(resized_frame.to_ndarray())
 
                 yield {
                     "image": torch.from_numpy(rgb).permute(2, 0, 1),

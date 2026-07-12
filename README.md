@@ -165,14 +165,14 @@ The policy is a **language-conditioned Action Chunking Transformer (ACT)**. It p
 
 ### Inputs
 
-- current `256 x 256` front-camera frame
+- current `128 x 128` front-camera tensor, resized from the stored `256 x 256` video
 - four-dimensional vehicle state
 - natural-language route instruction
 
 ### Deep-learning architecture
 
 ```text
-camera ------> pretrained ResNet-18 ------> 64 spatial vision tokens
+camera ------> pretrained ResNet-18 ------> 16 spatial vision tokens
 state  ------> state MLP -----------------> state token
 language ----> frozen MiniLM -------------> language token
 actions -----> CVAE posterior ------------> latent token during training
@@ -182,6 +182,8 @@ all context tokens --> Transformer encoder
 ```
 
 The action transformer and CVAE learn from the driving dataset. ResNet-18 is fine-tuned at a smaller learning rate, while MiniLM is frozen by default. This is a practical setup for a dataset with fewer than nine hours of expert driving; it does not pretend to pretrain vision and language from scratch.
+
+The source videos remain at `256 x 256`. PyAV resizes frames to `128 x 128` while decoding, so there is no separate converted dataset and no additional copy stored on disk.
 
 The objective is:
 
