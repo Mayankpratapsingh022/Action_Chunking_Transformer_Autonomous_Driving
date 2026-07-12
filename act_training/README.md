@@ -8,6 +8,7 @@ tags:
 - imitation-learning
 - action-chunking-transformer
 - vision-language-action
+- runpod
 - modal
 ---
 
@@ -105,19 +106,23 @@ The default optimization setup is:
 
 | Setting | Value |
 | --- | ---: |
-| Optimizer | AdamW |
-| GPU | Modal A10G |
-| Batch size | 32 |
-| Training steps | 20,000 |
+| Optimizer | Fused AdamW on CUDA |
+| GPU | RunPod or Modal H100 |
+| Batch size | 64 |
+| Training steps | 10,000 |
 | Policy learning rate | `1e-4` |
 | ResNet learning rate | `1e-5` |
-| Warmup | 1,000 steps |
+| Warmup | 500 steps |
 | Schedule | Cosine decay |
 | Precision | BF16 |
+| Float32 matmul | TF32 enabled |
 | Gradient clipping | `1.0` |
-| Checkpoint interval | 1,000 steps |
+| Validation interval | 500 steps |
+| Checkpoint interval | 500 steps |
 
 All defaults live in [`configs/base.json`](configs/base.json).
+
+The H100 profile processes `64 x 10,000 = 640,000` training samples. This is the same sample budget as the earlier batch-32, 20,000-step setup. Warmup, validation, checkpointing, and final-test batch counts are scaled with the larger batch, so their sample coverage remains comparable. The learning rates stay conservative for the first real run; batch-size scaling alone is not a reason to double them before a loss curve exists.
 
 ## Driving dataset
 
@@ -159,13 +164,117 @@ act-autonomous-driving/
 |   |-- inference.py              # Policy and receding-horizon control
 |   `-- hub.py                    # Hugging Face model publishing
 |-- tests/                        # CPU unit tests with dummy encoders
-|-- modal_app.py                  # A10G training entrypoint
+|-- scripts/runpod_bootstrap.sh  # Remote dependency and training bootstrap
+|-- scripts/download_hf_run.py   # Copy a completed Hub run back locally
+|-- runpod_train.py              # Standalone persistent-volume trainer
+|-- runpod_launcher.py           # RunPod REST lifecycle client
+|-- modal_app.py                  # H100 training entrypoint
 |-- requirements-local.txt        # Local Modal and Hub tools
+|-- requirements-runpod.txt       # Packages not supplied by the GPU image
 |-- requirements.txt              # Full training environment
 `-- README.md
 ```
 
 The video loader decodes each episode sequentially and constructs future action chunks in memory. It does not extract hundreds of thousands of PNG files before training.
+
+## RunPod setup
+
+RunPod Pods are the recommended path when the account already has RunPod credits. The launcher uses the official REST API and Python's standard library; it does not require the RunPod Python SDK. No GPU is created unless `launch --yes` is used.
+
+### 1. Publish the code
+
+The remote Pod clones the Git repository and branch configured in `.env`. Commit and push these files before launching. The default source is this repository's `main` branch.
+
+### 2. Configure local credentials
+
+Create a RunPod API key in the RunPod console, then prepare the ignored environment file:
+
+```bash
+test -f .env || cp .env.example .env
+```
+
+Set these values in `.env`:
+
+```dotenv
+HF_TOKEN=hf_your_write_token
+RUNPOD_API_KEY=your_runpod_api_key
+RUNPOD_NETWORK_VOLUME_ID=
+RUNPOD_HF_SECRET_NAME=huggingface_token
+RUNPOD_GPU_TYPE_IDS=NVIDIA H100 80GB HBM3
+RUNPOD_GIT_REF=main
+```
+
+`RUNPOD_API_KEY` stays on the Mac and authenticates lifecycle API calls. It is never included in the Pod specification or saved state.
+
+In the RunPod console's **Secrets** section, create a secret named `huggingface_token` whose value is the Hugging Face write token. The Pod receives the reference `{{ RUNPOD_SECRET_huggingface_token }}`, not the plaintext value from the local `.env`.
+
+### 3. Create persistent storage
+
+Choose a Secure Cloud data center with H100 availability. Network volumes are tied to one data center, so that selection determines which GPUs can be attached. Create a 50 GB volume through the launcher:
+
+```bash
+python3 runpod_launcher.py create-volume \
+  --name act-driving-training \
+  --size 50 \
+  --data-center-id YOUR_DATA_CENTER_ID \
+  --yes
+```
+
+Copy the returned ID into `RUNPOD_NETWORK_VOLUME_ID` in `.env`. Existing volumes can be inspected with:
+
+```bash
+python3 runpod_launcher.py list-volumes
+```
+
+Checkpoints, Hugging Face caches, persistent logs, and final artifacts are written below `/workspace/act-driving/` on this volume.
+
+### 4. Inspect and launch
+
+The dry run prints the exact Pod request and never contacts the billable create endpoint:
+
+```bash
+python3 runpod_launcher.py launch --dry-run
+```
+
+After checking the GPU, image, branch, batch size, and volume ID, launch the on-demand Pod:
+
+```bash
+python3 runpod_launcher.py launch --yes
+```
+
+The default is one `NVIDIA H100 80GB HBM3`, batch size 64, and 10,000 steps. A 12-hour watchdog stops a hung training command; override it with `--timeout-hours` only when necessary. The launcher refuses an accidental second active Pod unless `--allow-duplicate` is explicitly supplied. Spot capacity is available with `--spot`, but it is not recommended for the first training run.
+
+### 5. Monitor and clean up
+
+The launch response is stored in ignored `.runpod/last_pod.json`, without credentials. These commands use that saved Pod ID:
+
+```bash
+python3 runpod_launcher.py status
+python3 runpod_launcher.py watch
+python3 runpod_launcher.py logs
+```
+
+`watch` reports lifecycle status and hourly cost. `logs` prints the RunPod dashboard link; container logs carry the trainer's step, percent, loss, learning rate, elapsed time, ETA, and validation events. The same output is retained at `/workspace/act-driving/logs/act-driving-v1.log`.
+
+The training command exits after final evaluation and Hugging Face publishing, releasing the GPU. Verify that the Pod reaches `EXITED`, then delete the Pod record:
+
+```bash
+python3 runpod_launcher.py terminate --yes
+```
+
+RunPod network-volume Pods cannot be stopped and restarted in place. Termination does not delete the attached network volume.
+
+### 6. Resume or download
+
+To resume, launch again with the same run name, Git branch, and network volume. `resume: "auto"` loads `/workspace/act-driving/artifacts/runs/act-driving-v1/last.pt` with the optimizer, scheduler, scaler, step, and random-number states.
+
+After a successful run, copy the published artifact set back to this machine:
+
+```bash
+python3 scripts/download_hf_run.py --run-name act-driving-v1
+```
+
+This creates `artifacts/act-driving-v1/`, the layout expected by the inference API.
 
 ## Modal setup
 
@@ -178,26 +287,30 @@ python -m pip install -r requirements-local.txt
 
 hf auth login
 modal setup
-modal secret create huggingface HF_TOKEN=hf_your_write_token
+
+cp .env.example .env
+# Edit .env and set HF_TOKEN. The Modal token fields are optional after modal setup.
 ```
 
-The Hugging Face token needs write access to [`Mayank022/urban-vla-language-act`](https://huggingface.co/Mayank022/urban-vla-language-act). Keep it in the Modal secret. Do not add it to a config file or commit it to Git.
+The Hugging Face token needs write access to [`Mayank022/urban-vla-language-act`](https://huggingface.co/Mayank022/urban-vla-language-act). The local `.env` is ignored by both Git and the Hugging Face publishing script. At launch, only `HF_TOKEN` is transferred to the GPU container as an ephemeral Modal secret.
 
-## Start training
+## Start Modal training
 
 The following command is ready for the first run, but it has not been executed:
 
 ```bash
-modal run modal_app.py --run-name act-driving-v1
+./scripts/start_h100_tmux.sh
 ```
+
+The launcher reads `.env`, starts a detached `act-h100` tmux session, and writes output to `logs/act-driving-v1.log`. Only `HF_TOKEN` is passed to the GPU container; local Modal credentials are used only by the CLI.
 
 Override the two settings most likely to change during an initial experiment:
 
 ```bash
-modal run modal_app.py \
+./scripts/run_modal.sh \
   --run-name act-driving-v1 \
-  --max-steps 20000 \
-  --batch-size 32
+  --max-steps 10000 \
+  --batch-size 64
 ```
 
 Watch progress in a second terminal:
@@ -208,12 +321,12 @@ modal app logs urban-vla-language-act-training
 
 The logs report the current step, completion percentage, loss, learning rate, elapsed time, ETA, and validation metrics.
 
-## Checkpoints and resume
+## Modal checkpoints and resume
 
 Training writes to the persistent `urban-vla-act-artifacts` Modal Volume. To continue an interrupted run, use the same run name:
 
 ```bash
-modal run modal_app.py --run-name act-driving-v1
+./scripts/start_h100_tmux.sh
 ```
 
 With `resume: "auto"`, the trainer loads `last.pt` and restores the model, optimizer, scheduler, gradient scaler, step counter, and random-number states.
@@ -292,10 +405,10 @@ The zero image is only a shape example. Real inference must use the simulator's 
 
 ## Local verification
 
-These checks stay on the CPU. They do not request a Modal GPU or start training.
+These checks stay on the CPU. They do not request a RunPod or Modal GPU and do not start training.
 
 ```bash
-python -m compileall modal_app.py src tests scripts
+python -m compileall modal_app.py runpod_launcher.py runpod_train.py src tests scripts
 python -m pytest
 ```
 

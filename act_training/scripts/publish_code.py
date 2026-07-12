@@ -28,12 +28,16 @@ def main() -> None:
         commit_message="Add Modal ACT training code",
         ignore_patterns=[
             ".git/**",
+            ".env",
             ".venv/**",
             "artifacts/**",
+            "logs/**",
             "**/__pycache__/**",
             "**/*.pyc",
             ".pytest_cache/**",
+            ".runpod/**",
             ".ruff_cache/**",
+            ".cache/**",
         ],
     )
     print(result)

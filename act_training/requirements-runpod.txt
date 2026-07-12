@@ -1,0 +1,8 @@
+# PyTorch 2.8 is supplied by the pinned RunPod container image.
+av==15.0.0
+huggingface-hub==0.36.2
+matplotlib==3.9.2
+numpy==1.26.4
+safetensors==0.5.3
+tqdm==4.67.1
+transformers==4.52.3

@@ -84,7 +84,7 @@ def run_training(
     )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type != "cuda":
-        raise RuntimeError("The Modal training function requires a CUDA GPU")
+        raise RuntimeError("ACT training requires a CUDA GPU")
 
     tokenizer = AutoTokenizer.from_pretrained(config.text_model_name, cache_dir=config.cache_dir)
     model = LanguageConditionedACT(model_config).to(device)
@@ -439,6 +439,7 @@ def _make_optimizer(model: LanguageConditionedACT, config: TrainConfig) -> torch
             {"params": policy_parameters, "lr": config.learning_rate},
         ),
         weight_decay=config.weight_decay,
+        fused=torch.cuda.is_available(),
     )
 
 
@@ -468,7 +469,11 @@ def _seed_everything(seed: int) -> None:
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+    torch.set_float32_matmul_precision("high")
     torch.backends.cudnn.benchmark = True
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
 
 
 def _progress_event(row: dict[str, Any], max_steps: int, elapsed: float) -> dict[str, Any]:

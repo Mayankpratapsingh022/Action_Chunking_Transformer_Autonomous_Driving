@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -44,12 +45,16 @@ image = (
 app = modal.App(APP_NAME)
 artifact_volume = modal.Volume.from_name(ARTIFACT_VOLUME_NAME, create_if_missing=True)
 cache_volume = modal.Volume.from_name(CACHE_VOLUME_NAME, create_if_missing=True)
-huggingface_secret = modal.Secret.from_name("huggingface")
+huggingface_secret = (
+    modal.Secret.from_local_environ(["HF_TOKEN"])
+    if os.environ.get("HF_TOKEN")
+    else modal.Secret.from_name("huggingface")
+)
 
 
 @app.function(
     image=image,
-    gpu="A10G",
+    gpu="H100",
     cpu=8,
     memory=32_768,
     timeout=86_400,
@@ -76,8 +81,8 @@ def train_on_modal(config_values: dict[str, Any]) -> dict[str, Any]:
 @app.local_entrypoint()
 def main(
     run_name: str = "urban-act-v1",
-    max_steps: int = 20_000,
-    batch_size: int = 32,
+    max_steps: int = 10_000,
+    batch_size: int = 64,
     config_path: str = "configs/base.json",
     download: bool = True,
 ) -> None:
@@ -105,4 +110,3 @@ def main(
             check=True,
         )
         print(f"Downloaded artifacts to {destination}")
-

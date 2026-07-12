@@ -3,6 +3,9 @@ dist/
 .vite/
 smoke-artifacts/
 *.local
+.env
+.env.*
+!.env.example
 __pycache__/
 *.pyc
 datasets/*/raw/

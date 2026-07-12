@@ -2,8 +2,10 @@
 __pycache__/
 .pytest_cache/
 .ruff_cache/
+.cache/
 artifacts/
+logs/
+.runpod/
 *.pyc
 *.pyo
 .DS_Store
-

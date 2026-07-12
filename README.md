@@ -1,6 +1,6 @@
 # Action Chunking Transformer for Autonomous Driving
 
-An end-to-end research project for language-conditioned autonomous driving. The repository contains the browser simulator, automated expert, dataset collector, recovery scenarios, and Python code for training an Action Chunking Transformer on Modal.
+An end-to-end research project for language-conditioned autonomous driving. The repository contains the browser simulator, automated expert, dataset collector, recovery scenarios, and Python code for training an Action Chunking Transformer on RunPod or Modal.
 
 ![Autonomous-driving rollout with the policy camera observation and live ACT action-vector graph](docs/images/act-driving-observation-actions.gif)
 
@@ -13,7 +13,7 @@ An end-to-end research project for language-conditioned autonomous driving. The 
 | Dataset collection and validation | Complete |
 | Hugging Face dataset | Published |
 | Language-conditioned ACT training code | Ready and tested |
-| Modal GPU training | Not started |
+| RunPod/Modal GPU training | Not started |
 | Trained checkpoint | Not available yet |
 | Closed-loop learned-policy evaluation | Pending |
 
@@ -42,7 +42,7 @@ flowchart TD
 
     demonstrations --> dataset[(Hugging Face expert dataset)]
     failures --> analysis[Safety analysis only]
-    dataset --> training[Language-conditioned ACT training on Modal]
+    dataset --> training[Language-conditioned ACT cloud training]
     training --> chunks[Throttle, brake, and steering action chunks]
     chunks --> evaluation[Closed-loop simulator evaluation]
     evaluation -. rollout feedback .-> world
@@ -195,9 +195,35 @@ Padded actions at episode boundaries are excluded by a mask. During inference th
 
 The full architecture, training defaults, artifact format, metrics, and inference API are documented in the [ACT training guide](act_training/README.md).
 
+## Train on RunPod
+
+The RunPod launcher creates an on-demand H100 Pod through the REST API. It clones this repository, trains from the published Hugging Face dataset, stores resumable checkpoints on a network volume, and publishes the completed model and plots to Hugging Face. It requires `--yes` before creating billable compute.
+
+Before launching, commit and push the RunPod files because the remote Pod clones the configured Git branch. Then configure `act_training/.env` with `RUNPOD_API_KEY` and `RUNPOD_NETWORK_VOLUME_ID`, and create a RunPod secret named `huggingface_token` containing the Hugging Face write token.
+
+```bash
+cd act_training
+
+python3 runpod_launcher.py launch --dry-run
+python3 runpod_launcher.py launch --yes
+
+python3 runpod_launcher.py watch
+python3 runpod_launcher.py logs
+```
+
+The lifecycle watcher reports Pod allocation and exit state. The RunPod dashboard shows the full training stream, including step, percent, loss, elapsed time, ETA, and validation metrics. After the Pod reaches `EXITED`, remove its Pod record without deleting the network volume:
+
+```bash
+python3 runpod_launcher.py terminate --yes
+```
+
+The full API-key, secret, network-volume, resume, monitoring, and artifact-download workflow is in the [ACT training guide](act_training/README.md).
+
 ## Train on Modal
 
 No Modal job has been launched from this repository. These commands are for the future training run.
+
+The default H100 profile uses BF16, fused AdamW, a batch size of 64, and 10,000 optimizer steps. That keeps the training budget at 640,000 samples.
 
 ```bash
 cd act_training
@@ -207,9 +233,11 @@ python -m pip install -r requirements-local.txt
 
 hf auth login
 modal setup
-modal secret create huggingface HF_TOKEN=hf_your_write_token
 
-modal run modal_app.py --run-name act-driving-v1
+test -f .env || cp .env.example .env
+# Edit .env and set HF_TOKEN.
+
+./scripts/start_h100_tmux.sh
 ```
 
 Monitor the run from another terminal:
@@ -218,7 +246,7 @@ Monitor the run from another terminal:
 modal app logs urban-vla-language-act-training
 ```
 
-Training checkpoints are committed to a persistent Modal Volume every 1,000 steps. Re-running with the same name loads `last.pt` and continues. When training completes, the entrypoint downloads the artifacts locally and publishes the checkpoint, tokenizer, metrics, and plots to Hugging Face.
+Training checkpoints are committed to a persistent Modal Volume every 500 steps. Re-running with the same name loads `last.pt` and continues. When training completes, the entrypoint downloads the artifacts locally and publishes the checkpoint, tokenizer, metrics, and plots to Hugging Face.
 
 ## Evaluation
 
@@ -251,7 +279,9 @@ A trained checkpoint still needs closed-loop evaluation for route completion, co
 |   |-- src/urban_act/         # Python ACT package
 |   |-- configs/               # Training defaults
 |   |-- tests/                 # CPU unit tests
-|   `-- modal_app.py           # Modal A10G entrypoint
+|   |-- runpod_train.py        # Standalone RunPod trainer
+|   |-- runpod_launcher.py     # RunPod REST lifecycle client
+|   `-- modal_app.py           # Modal H100 entrypoint
 |-- docs/images/               # Tracked documentation media
 |-- DATASET_COLLECTION.md
 |-- package.json
@@ -280,7 +310,7 @@ ACT package checks, without a GPU or training run:
 
 ```bash
 cd act_training
-python -m compileall modal_app.py src tests scripts
+python -m compileall modal_app.py runpod_launcher.py runpod_train.py src tests scripts
 python -m pytest
 ```
 
