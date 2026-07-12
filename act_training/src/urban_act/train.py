@@ -4,6 +4,7 @@ import json
 import math
 import os
 import random
+import re
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -12,7 +13,7 @@ from typing import Any
 import numpy as np
 import torch
 from huggingface_hub import snapshot_download
-from huggingface_hub.errors import HfHubHTTPError
+from huggingface_hub.errors import HfHubHTTPError, LocalEntryNotFoundError
 from torch import Tensor
 from transformers import AutoTokenizer
 
@@ -31,7 +32,7 @@ from urban_act.metrics import ActionMetricAccumulator, EvaluationSamples
 from urban_act.model import LanguageConditionedACT, ModelConfig
 from urban_act.plots import write_all_plots
 
-TRANSIENT_HUB_STATUS_CODES = frozenset({408, 425, 429, 500, 502, 503, 504})
+TRANSIENT_HUB_STATUS_CODES = frozenset({408, 425, 500, 502, 503, 504})
 
 
 def _download_dataset_snapshot(
@@ -53,11 +54,12 @@ def _download_dataset_snapshot(
                     allow_patterns=("config.yaml", "schema.json", "manifests/*.jsonl", "raw/accepted/**"),
                 )
             )
-        except HfHubHTTPError as error:
-            status_code = error.response.status_code if error.response is not None else None
-            if attempt == attempts or status_code not in TRANSIENT_HUB_STATUS_CODES:
+        except (HfHubHTTPError, LocalEntryNotFoundError) as error:
+            response = _hub_error_response(error)
+            status_code = response.status_code if response is not None else None
+            if attempt == attempts or (status_code != 429 and status_code not in TRANSIENT_HUB_STATUS_CODES):
                 raise
-            delay_seconds = min(2 ** (attempt - 1), 16)
+            delay_seconds = _rate_limit_delay(response) if status_code == 429 else min(2 ** (attempt - 1), 16)
             print(
                 json.dumps(
                     {
@@ -73,6 +75,25 @@ def _download_dataset_snapshot(
             sleep(delay_seconds)
 
     raise RuntimeError("Dataset download retry loop exited unexpectedly")
+
+
+def _hub_error_response(error: BaseException) -> Any | None:
+    current: BaseException | None = error
+    visited: set[int] = set()
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        if isinstance(current, HfHubHTTPError) and current.response is not None:
+            return current.response
+        current = current.__cause__ or current.__context__
+    return None
+
+
+def _rate_limit_delay(response: Any | None) -> int:
+    if response is not None:
+        match = re.search(r"(?:^|[;,])\s*t=(\d+)", response.headers.get("RateLimit", ""))
+        if match:
+            return int(match.group(1)) + 1
+    return 301
 
 
 def run_training(

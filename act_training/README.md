@@ -231,7 +231,7 @@ Detach with `Ctrl+B`, then `D`. Reattach later with:
 tmux attach -t act-training
 ```
 
-The first invocation installs the non-Torch requirements and the CUDA 12.8 TorchVision wheel. It then verifies the GPU before downloading the dataset. The entrypoint disables RunPod's deprecated `HF_HUB_ENABLE_HF_TRANSFER` default and uses standard HTTP instead of Xet by default, avoiding optional-transfer and Xet token failures for this small dataset. Set `HF_HUB_DISABLE_XET=0` before launch to opt back into Xet. If the selected template does not already contain Torch 2.8, add `--install-pytorch`. On later invocations, `--skip-setup` avoids the pip checks.
+The first invocation installs the non-Torch requirements and the CUDA 12.8 TorchVision wheel. It then verifies the GPU before downloading the dataset. The entrypoint disables RunPod's deprecated `HF_HUB_ENABLE_HF_TRANSFER` default and uses standard HTTP instead of Xet by default, avoiding optional-transfer and Xet token failures for this small dataset. Dataset downloads retry transient Hub failures and honor the resolver reset delay after a `429` response. Set `HF_HUB_DISABLE_XET=0` before launch to opt back into Xet. If the selected template does not already contain Torch 2.8, add `--install-pytorch`. On later invocations, `--skip-setup` avoids the pip checks.
 
 ### 4. Monitor and resume
 
