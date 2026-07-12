@@ -1,0 +1,20 @@
+name: urban-vla-expert-v1
+fps: 10
+image:
+  key: observation.images.front
+  width: 256
+  height: 256
+state:
+  key: observation.state
+  fields: [speed_mps, steering, previous_throttle, previous_brake]
+action:
+  key: action
+  fields: [throttle, brake, steering]
+episodes:
+  nominal: 900
+  recovery: 180
+  failures: 90
+splits:
+  train: 0.70
+  validation: 0.15
+  test: 0.15

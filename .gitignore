@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.vite/
+smoke-artifacts/
+*.local
+__pycache__/
+*.pyc
+datasets/*/raw/
+datasets/*/lerobot/
+datasets/*/logs/
+datasets/*/reports/
+datasets/*/state/

@@ -1,0 +1,41 @@
+{
+  "name": "vla-urban-autonomy-sim",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "tsc && vite build",
+    "test": "vitest run",
+    "smoke": "node scripts/smoke-playwright.mjs",
+    "audit": "node scripts/quality-audit.mjs",
+    "dataset:manifest": "node scripts/generate-dataset-manifest.mjs",
+    "dataset:collect": "node --no-warnings scripts/dataset-supervisor.mjs",
+    "dataset:start": "node --no-warnings scripts/dataset-control.mjs start",
+    "dataset:status": "node --no-warnings scripts/dataset-control.mjs status",
+    "dataset:logs": "node --no-warnings scripts/dataset-control.mjs logs",
+    "dataset:stop": "node --no-warnings scripts/dataset-control.mjs stop",
+    "dataset:validate": "node scripts/validate-dataset.mjs",
+    "dataset:test": "node --no-warnings --test scripts/dataset-state.node-test.mjs",
+    "dataset:convert": "python3 scripts/convert_lerobot.py",
+    "dataset:publish": "python3 scripts/publish_hf_dataset.py",
+    "dataset:benchmark": "node --no-warnings scripts/benchmark-collector.mjs",
+    "dataset:qualify": "node --no-warnings scripts/qualify-expert.mjs",
+    "check": "npm run build && npm run test"
+  },
+  "dependencies": {
+    "@fortawesome/fontawesome-svg-core": "^7.3.0",
+    "@fortawesome/free-solid-svg-icons": "^7.3.0",
+    "three": "^0.166.1",
+    "vite": "^8.1.3"
+  },
+  "devDependencies": {
+    "@types/three": "^0.185.0",
+    "playwright": "^1.61.1",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.10"
+  }
+}
