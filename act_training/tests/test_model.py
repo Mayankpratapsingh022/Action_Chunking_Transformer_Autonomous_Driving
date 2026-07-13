@@ -19,8 +19,9 @@ class DummyTextEncoder(nn.Module):
         return SimpleNamespace(last_hidden_state=self.embedding(input_ids))
 
 
-def make_model(image_size: int = 64) -> LanguageConditionedACT:
+def make_model(image_size: int = 64, *, policy_version: str = "v2") -> LanguageConditionedACT:
     config = ModelConfig(
+        policy_version=policy_version,
         image_size=image_size,
         chunk_size=4,
         d_model=32,
@@ -70,11 +71,20 @@ def test_model_predicts_bounded_action_chunks_and_backpropagates() -> None:
         mask,
         output["posterior_mean"],
         output["posterior_log_variance"],
-        kl_weight=10.0,
+        kl_weight=0.1,
+        activity_logits=output["action_activity_logits"],
+        action_magnitudes=output["action_magnitudes"],
+        positive_weights=torch.tensor([2.0, 4.0]),
+        sample_weights=torch.ones(2),
+        steering_loss_weight=2.0,
+        steering_active_weight=3.0,
+        overlap_loss_weight=0.25,
     )
     losses["loss"].backward()
     assert torch.isfinite(losses["loss"])
-    assert model.action_head.weight.grad is not None
+    assert model.action_activity_head.weight.grad is not None
+    assert model.action_magnitude_head.weight.grad is not None
+    assert model.steering_head.weight.grad is not None
 
 
 def test_inference_uses_deterministic_zero_latent() -> None:
@@ -110,3 +120,73 @@ def test_action_loss_ignores_padded_targets() -> None:
 
     losses = act_loss(predicted, target, mask, latent, latent, kl_weight=10.0)
     assert losses["loss"].item() == 0.0
+
+
+def test_config_without_policy_version_loads_the_v1_architecture() -> None:
+    config = ModelConfig.from_dict(
+        {
+            "image_size": 64,
+            "chunk_size": 4,
+            "d_model": 32,
+            "nhead": 4,
+            "encoder_layers": 1,
+            "decoder_layers": 1,
+            "latent_dim": 8,
+            "text_hidden_size": 16,
+            "vision_channels": 16,
+            "pretrained_vision": False,
+        }
+    )
+    assert config.policy_version == "v1"
+
+    model = make_model(policy_version=config.policy_version)
+    assert hasattr(model, "action_head")
+    assert not hasattr(model, "action_activity_head")
+
+
+def test_balanced_objective_learns_nonzero_longitudinal_actions() -> None:
+    torch.manual_seed(7)
+    target = torch.tensor(
+        [
+            [[1.0, 0.0, 0.0], [0.8, 0.0, 0.3], [0.0, 0.9, -0.4], [0.0, 0.0, 0.0]],
+            [[0.7, 0.0, -0.2], [0.0, 0.8, 0.2], [0.0, 0.0, 0.0], [0.6, 0.0, 0.0]],
+        ]
+    )
+    mask = torch.ones(2, 4, dtype=torch.bool)
+    activity_logits = nn.Parameter(torch.full((2, 4, 2), -1.0))
+    magnitude_logits = nn.Parameter(torch.zeros(2, 4, 2))
+    steering_logits = nn.Parameter(torch.zeros(2, 4))
+    optimizer = torch.optim.Adam((activity_logits, magnitude_logits, steering_logits), lr=0.15)
+    latent = torch.zeros(2, 4)
+
+    for _ in range(80):
+        optimizer.zero_grad()
+        magnitudes = magnitude_logits.sigmoid()
+        steering = steering_logits.tanh()
+        probabilities = activity_logits.sigmoid()
+        actions = torch.cat(
+            (torch.where(probabilities >= 0.5, magnitudes, 0.0), steering.unsqueeze(-1)),
+            dim=-1,
+        )
+        losses = act_loss(
+            actions,
+            target,
+            mask,
+            latent,
+            latent,
+            kl_weight=0.0,
+            activity_logits=activity_logits,
+            action_magnitudes=magnitudes,
+            positive_weights=torch.tensor([2.0, 4.0]),
+            sample_weights=torch.ones(2),
+            steering_loss_weight=2.0,
+            steering_active_weight=3.0,
+            overlap_loss_weight=0.25,
+        )
+        losses["loss"].backward()
+        optimizer.step()
+
+    predicted_active = activity_logits.sigmoid() >= 0.5
+    target_active = target[..., :2] > 0.05
+    assert torch.equal(predicted_active, target_active)
+    assert magnitudes[target_active].mean() > 0.65

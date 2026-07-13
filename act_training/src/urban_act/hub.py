@@ -31,9 +31,7 @@ def publish_training_run(
         if not path.is_file() or path == rendered_readme:
             continue
         repository_path = f"runs/{run_name}/{path.relative_to(root).as_posix()}"
-        operations.append(
-            CommitOperationAdd(path_in_repo=repository_path, path_or_fileobj=path)
-        )
+        operations.append(CommitOperationAdd(path_in_repo=repository_path, path_or_fileobj=path))
 
     top_level_files = ("model.safetensors", "config.json", "training_config.json", "metrics.json", "history.json")
     for name in top_level_files:
@@ -59,19 +57,31 @@ def _render_readme(template: str, run_name: str, metrics: dict[str, Any]) -> str
     validation = metrics["validation"]
     test = metrics["test"]
     action_mae = test["action_mae"]
+    active_mae = test.get("active_action_mae", action_mae)
+    throttle_recall = test.get("activity", {}).get("throttle", {}).get("recall", 0.0)
+    brake_recall = test.get("activity", {}).get("brake", {}).get("recall", 0.0)
+    startup_recall = test.get("startup_throttle", {}).get("recall", 0.0)
+    gates_passed = metrics.get("quality_gates_passed", False)
     result = "\n".join(
         (
             f"Latest completed run: `{run_name}`.",
             "",
             "| Metric | Value |",
             "| --- | ---: |",
+            f"| Validation selection score | {validation.get('selection_score', validation['mean_action_mae']):.5f} |",
             f"| Best validation mean action MAE | {validation['mean_action_mae']:.5f} |",
             f"| Test mean action MAE | {test['mean_action_mae']:.5f} |",
             f"| Test throttle MAE | {action_mae['throttle']:.5f} |",
             f"| Test brake MAE | {action_mae['brake']:.5f} |",
             f"| Test steering MAE | {action_mae['steering']:.5f} |",
+            f"| Test active throttle MAE | {active_mae['throttle']:.5f} |",
+            f"| Test active brake MAE | {active_mae['brake']:.5f} |",
+            f"| Test throttle recall | {throttle_recall:.2%} |",
+            f"| Test brake recall | {brake_recall:.2%} |",
+            f"| Test startup throttle recall | {startup_recall:.2%} |",
             f"| Test brake accuracy | {test['brake_accuracy']:.2%} |",
             f"| Test steering-direction accuracy | {test['steering_direction_accuracy']:.2%} |",
+            f"| Validation and test gates passed | {'yes' if gates_passed else 'no'} |",
             "",
             f"Full metrics and plots are in [`runs/{run_name}/`](./runs/{run_name}/).",
         )

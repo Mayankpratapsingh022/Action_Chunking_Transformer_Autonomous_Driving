@@ -24,7 +24,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Prepare a manually created RunPod machine and train the ACT driving policy."
     )
-    parser.add_argument("--run-name", default="act-driving-v1")
+    parser.add_argument("--run-name", default="act-driving-v2")
     parser.add_argument("--max-steps", type=int, default=10_000)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--num-workers", type=int, default=4)

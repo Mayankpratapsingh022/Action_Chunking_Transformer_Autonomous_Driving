@@ -6,7 +6,13 @@ from pathlib import Path
 import av
 import numpy as np
 
-from urban_act.data import EpisodeRecord, UrbanEpisodeStream, load_episode_records
+from urban_act.data import (
+    CriticalWindowConfig,
+    EpisodeRecord,
+    UrbanEpisodeStream,
+    compute_action_statistics,
+    load_episode_records,
+)
 
 
 def _add_episode(root: Path, episode_id: str) -> None:
@@ -86,6 +92,15 @@ def test_episode_stream_resizes_source_video_during_decode(tmp_path: Path) -> No
         shuffle=False,
         shuffle_buffer=1,
         seed=42,
+        critical_windows=CriticalWindowConfig(
+            activity_threshold=0.05,
+            steering_threshold=0.15,
+            startup_weight=6.0,
+            throttle_weight=2.0,
+            brake_weight=4.0,
+            turn_weight=2.5,
+            recovery_weight=2.0,
+        ),
     )
 
     sample = next(iter(dataset))
@@ -93,6 +108,33 @@ def test_episode_stream_resizes_source_video_during_decode(tmp_path: Path) -> No
     assert sample["image"].shape == (3, 128, 128)
     assert sample["actions"].shape == (2, 3)
     assert sample["action_mask"].tolist() == [True, True]
+    assert sample["sample_weight"].item() == 6.0
+
+
+def test_action_statistics_produce_balancing_weights_and_zero_baseline(tmp_path: Path) -> None:
+    directory = tmp_path / "episode"
+    directory.mkdir()
+    actions = ([1.0, 0.0, 0.0], [0.5, 0.0, 0.2], [0.0, 1.0, -0.4], [0.0, 0.0, 0.0])
+    rows = [{"observation": {"state": [0.0, 0.0, 0.0, 0.0]}, "action": action} for action in actions]
+    (directory / "telemetry.jsonl").write_text("\n".join(map(json.dumps, rows)) + "\n")
+    record = EpisodeRecord(
+        episode_id="statistics",
+        kind="nominal",
+        split="train",
+        task_id="continue_straight_intersection",
+        instruction="Continue straight.",
+        directory=directory,
+    )
+
+    statistics = compute_action_statistics(
+        [record],
+        activity_threshold=0.05,
+        positive_weight_cap=12.0,
+    )
+
+    assert statistics["active_fraction"] == {"throttle": 0.5, "brake": 0.25}
+    assert statistics["positive_weights"] == {"throttle": 1.0, "brake": 3.0}
+    assert statistics["zero_baseline_mae"]["throttle"] == 0.375
 
 
 def _write_test_video(path: Path, *, size: int, frame_count: int) -> None:

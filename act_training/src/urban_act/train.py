@@ -25,7 +25,14 @@ from urban_act.checkpoints import (
     training_state,
 )
 from urban_act.config import TrainConfig
-from urban_act.data import UrbanEpisodeStream, compute_state_statistics, load_episode_records, make_dataloader
+from urban_act.data import (
+    CriticalWindowConfig,
+    UrbanEpisodeStream,
+    compute_action_statistics,
+    compute_state_statistics,
+    load_episode_records,
+    make_dataloader,
+)
 from urban_act.hub import publish_training_run, write_json
 from urban_act.losses import act_loss
 from urban_act.metrics import ActionMetricAccumulator, EvaluationSamples
@@ -121,7 +128,19 @@ def run_training(
         state_statistics = compute_state_statistics(train_records)
         write_json(state_stats_path, state_statistics)
 
+    action_stats_path = run_dir / "action_statistics.json"
+    if action_stats_path.exists():
+        action_statistics = json.loads(action_stats_path.read_text())
+    else:
+        action_statistics = compute_action_statistics(
+            train_records,
+            activity_threshold=config.activity_threshold,
+            positive_weight_cap=config.positive_weight_cap,
+        )
+        write_json(action_stats_path, action_statistics)
+
     model_config = ModelConfig(
+        policy_version=config.policy_version,
         image_size=config.image_size,
         state_dim=config.state_dim,
         action_dim=config.action_dim,
@@ -137,6 +156,7 @@ def run_training(
         pretrained_vision=config.pretrained_vision,
         state_mean=tuple(state_statistics["mean"]),
         state_std=tuple(state_statistics["std"]),
+        activity_probability_threshold=config.activity_probability_threshold,
     )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type != "cuda":
@@ -144,12 +164,29 @@ def run_training(
 
     tokenizer = AutoTokenizer.from_pretrained(config.text_model_name, cache_dir=config.cache_dir)
     model = LanguageConditionedACT(model_config).to(device)
+    positive_weights = torch.tensor(
+        [
+            action_statistics["positive_weights"]["throttle"],
+            action_statistics["positive_weights"]["brake"],
+        ],
+        device=device,
+        dtype=torch.float32,
+    )
     optimizer = _make_optimizer(model, config)
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, _schedule(config))
     scaler = torch.amp.GradScaler("cuda", enabled=config.mixed_precision == "fp16")
     amp_dtype = torch.bfloat16 if config.mixed_precision == "bf16" else torch.float16
     amp_enabled = config.mixed_precision != "none"
 
+    critical_windows = CriticalWindowConfig(
+        activity_threshold=config.activity_threshold,
+        steering_threshold=config.steering_active_threshold,
+        startup_weight=config.startup_window_weight,
+        throttle_weight=config.throttle_window_weight,
+        brake_weight=config.brake_window_weight,
+        turn_weight=config.turn_window_weight,
+        recovery_weight=config.recovery_window_weight,
+    )
     train_dataset = UrbanEpisodeStream(
         train_records,
         image_size=config.image_size,
@@ -158,6 +195,7 @@ def run_training(
         shuffle=True,
         shuffle_buffer=config.shuffle_buffer,
         seed=config.seed,
+        critical_windows=critical_windows if config.policy_version == "v2" else None,
     )
     validation_dataset = UrbanEpisodeStream(
         validation_records,
@@ -200,7 +238,7 @@ def run_training(
     global_step = 0
     epoch = 0
     elapsed_offset = 0.0
-    best_validation_mae = math.inf
+    best_validation_score = math.inf
     best_step = 0
     best_validation_metrics: dict[str, Any] | None = None
     resume_path = _resume_path(run_dir, config.resume)
@@ -213,7 +251,9 @@ def run_training(
         global_step = int(checkpoint["global_step"])
         epoch = int(checkpoint["epoch"])
         elapsed_offset = float(checkpoint.get("elapsed_seconds", 0.0))
-        best_validation_mae = float(checkpoint.get("best_validation_mae", math.inf))
+        best_validation_score = float(
+            checkpoint.get("best_validation_score", checkpoint.get("best_validation_mae", math.inf))
+        )
         best_step = int(checkpoint.get("best_step", 0))
         best_validation_metrics = checkpoint.get("best_validation_metrics")
         history = checkpoint.get("history", history)
@@ -221,7 +261,11 @@ def run_training(
         _log_event(run_dir, {"event": "resumed", "checkpoint": str(resume_path), "step": global_step})
 
     started = time.monotonic()
-    rolling = {"loss": 0.0, "reconstruction_loss": 0.0, "kl_loss": 0.0, "count": 0}
+    loss_names = ["loss", "reconstruction_loss", "kl_loss"]
+    if config.policy_version == "v2":
+        loss_names.extend(("activity_loss", "magnitude_loss", "steering_loss", "overlap_loss"))
+    rolling = {name: 0.0 for name in loss_names}
+    rolling["count"] = 0
     last_validation_samples = EvaluationSamples()
 
     while global_step < config.max_steps:
@@ -242,13 +286,25 @@ def run_training(
                     target_actions=tensors["actions"],
                     action_mask=tensors["action_mask"],
                 )
+                effective_kl_weight = _effective_kl_weight(config, global_step)
                 losses = act_loss(
                     output["actions"],
                     tensors["actions"],
                     tensors["action_mask"],
                     output["posterior_mean"],
                     output["posterior_log_variance"],
-                    kl_weight=config.kl_weight,
+                    kl_weight=effective_kl_weight,
+                    activity_logits=output.get("action_activity_logits"),
+                    action_magnitudes=output.get("action_magnitudes"),
+                    positive_weights=positive_weights,
+                    sample_weights=tensors["sample_weight"],
+                    activity_threshold=config.activity_threshold,
+                    steering_active_threshold=config.steering_active_threshold,
+                    activity_loss_weight=config.activity_loss_weight,
+                    magnitude_loss_weight=config.magnitude_loss_weight,
+                    steering_loss_weight=config.steering_loss_weight,
+                    steering_active_weight=config.steering_active_weight,
+                    overlap_loss_weight=config.overlap_loss_weight,
                 )
 
             scaler.scale(losses["loss"]).backward()
@@ -259,7 +315,7 @@ def run_training(
             scheduler.step()
             global_step += 1
 
-            for name in ("loss", "reconstruction_loss", "kl_loss"):
+            for name in loss_names:
                 rolling[name] += float(losses[name].detach())
             rolling["count"] += 1
 
@@ -267,14 +323,14 @@ def run_training(
                 elapsed = elapsed_offset + time.monotonic() - started
                 row = {
                     "step": global_step,
-                    "loss": rolling["loss"] / rolling["count"],
-                    "reconstruction_loss": rolling["reconstruction_loss"] / rolling["count"],
-                    "kl_loss": rolling["kl_loss"] / rolling["count"],
+                    **{name: rolling[name] / rolling["count"] for name in loss_names},
+                    "effective_kl_weight": _effective_kl_weight(config, global_step - 1),
                     "learning_rate": optimizer.param_groups[-1]["lr"],
                 }
                 history["train"].append(row)
                 _log_event(run_dir, _progress_event(row, config.max_steps, elapsed))
-                rolling = {"loss": 0.0, "reconstruction_loss": 0.0, "kl_loss": 0.0, "count": 0}
+                rolling = {name: 0.0 for name in loss_names}
+                rolling["count"] = 0
 
             if global_step % config.eval_interval == 0:
                 validation_metrics, last_validation_samples = evaluate(
@@ -285,12 +341,13 @@ def run_training(
                     device,
                     max_batches=config.eval_batches,
                     mixed_precision=config.mixed_precision,
+                    config=config,
                 )
                 validation_row = {"step": global_step, **validation_metrics}
                 history["validation"].append(validation_row)
                 _log_event(run_dir, {"event": "validation", **validation_row})
-                if validation_metrics["mean_action_mae"] < best_validation_mae:
-                    best_validation_mae = validation_metrics["mean_action_mae"]
+                if validation_metrics["selection_score"] < best_validation_score:
+                    best_validation_score = validation_metrics["selection_score"]
                     best_validation_metrics = validation_metrics
                     best_step = global_step
                     save_checkpoint(
@@ -303,7 +360,7 @@ def run_training(
                             global_step=global_step,
                             epoch=epoch,
                             elapsed_seconds=elapsed_offset + time.monotonic() - started,
-                            best_validation_mae=best_validation_mae,
+                            best_validation_score=best_validation_score,
                             best_step=best_step,
                             best_validation_metrics=best_validation_metrics,
                             history=history,
@@ -322,7 +379,7 @@ def run_training(
                         global_step=global_step,
                         epoch=epoch,
                         elapsed_seconds=elapsed_offset + time.monotonic() - started,
-                        best_validation_mae=best_validation_mae,
+                        best_validation_score=best_validation_score,
                         best_step=best_step,
                         best_validation_metrics=best_validation_metrics,
                         history=history,
@@ -340,10 +397,11 @@ def run_training(
             device,
             max_batches=config.eval_batches,
             mixed_precision=config.mixed_precision,
+            config=config,
         )
         history["validation"].append({"step": global_step, **validation_metrics})
-        if validation_metrics["mean_action_mae"] < best_validation_mae:
-            best_validation_mae = validation_metrics["mean_action_mae"]
+        if validation_metrics["selection_score"] < best_validation_score:
+            best_validation_score = validation_metrics["selection_score"]
             best_validation_metrics = validation_metrics
             best_step = global_step
             save_checkpoint(
@@ -356,7 +414,7 @@ def run_training(
                     global_step=global_step,
                     epoch=epoch,
                     elapsed_seconds=elapsed_offset + time.monotonic() - started,
-                    best_validation_mae=best_validation_mae,
+                    best_validation_score=best_validation_score,
                     best_step=best_step,
                     best_validation_metrics=best_validation_metrics,
                     history=history,
@@ -374,7 +432,7 @@ def run_training(
             global_step=global_step,
             epoch=epoch,
             elapsed_seconds=elapsed_offset + time.monotonic() - started,
-            best_validation_mae=best_validation_mae,
+            best_validation_score=best_validation_score,
             best_step=best_step,
             best_validation_metrics=best_validation_metrics,
             history=history,
@@ -392,12 +450,19 @@ def run_training(
         device,
         max_batches=config.test_batches,
         mixed_precision=config.mixed_precision,
+        config=config,
     )
     metrics = {
         "best_step": best_step,
         "validation": best_validation_metrics,
         "test": test_metrics,
     }
+    quality_gates_passed = bool(
+        best_validation_metrics
+        and best_validation_metrics["quality_gates"]["all_passed"]
+        and test_metrics["quality_gates"]["all_passed"]
+    )
+    metrics["quality_gates_passed"] = quality_gates_passed
 
     save_inference_weights(model, run_dir / "model.safetensors")
     model_payload = {"architectures": ["LanguageConditionedACT"], "model_type": "urban_language_act"}
@@ -409,7 +474,8 @@ def run_training(
     write_all_plots(run_dir / "plots", history, test_metrics, test_samples or last_validation_samples)
 
     hub_url = None
-    if config.push_to_hub:
+    publish_allowed = not config.require_quality_gates or quality_gates_passed
+    if config.push_to_hub and publish_allowed:
         if not token:
             raise RuntimeError("HF_TOKEN is required when push_to_hub is enabled")
         hub_url = publish_training_run(
@@ -420,6 +486,18 @@ def run_training(
             readme_template=readme_template,
             private=config.hub_private,
             token=token,
+        )
+    elif config.push_to_hub:
+        _log_event(
+            run_dir,
+            {
+                "event": "hub_publish_skipped",
+                "reason": "validation_or_test_quality_gates_failed",
+                "quality_gates": {
+                    "validation": best_validation_metrics["quality_gates"] if best_validation_metrics else None,
+                    "test": test_metrics["quality_gates"],
+                },
+            },
         )
     result = {
         "run_name": config.run_name,
@@ -442,10 +520,20 @@ def evaluate(
     *,
     max_batches: int,
     mixed_precision: str,
+    config: TrainConfig,
 ) -> tuple[dict[str, Any], EvaluationSamples]:
     model.eval()
     dataset.set_epoch(0)
-    accumulator = ActionMetricAccumulator()
+    accumulator = ActionMetricAccumulator(
+        activity_threshold=config.activity_threshold,
+        steering_active_threshold=config.steering_active_threshold,
+        min_startup_throttle_recall=config.min_startup_throttle_recall,
+        min_throttle_recall=config.min_throttle_recall,
+        min_brake_recall=config.min_brake_recall,
+        min_steering_direction_accuracy=config.min_steering_direction_accuracy,
+        min_zero_baseline_improvement=config.min_zero_baseline_improvement,
+        max_throttle_brake_overlap_rate=config.max_throttle_brake_overlap_rate,
+    )
     amp_enabled = mixed_precision != "none"
     amp_dtype = torch.bfloat16 if mixed_precision == "bf16" else torch.float16
     for batch_index, batch in enumerate(loader):
@@ -461,14 +549,20 @@ def evaluate(
                 encoded["input_ids"],
                 encoded["attention_mask"],
             )
-        accumulator.update(output["actions"], tensors["actions"], tensors["action_mask"], batch["task_id"])
+        accumulator.update(
+            output["actions"],
+            tensors["actions"],
+            tensors["action_mask"],
+            batch["task_id"],
+            states=tensors["state"],
+        )
     return accumulator.compute(), accumulator.samples
 
 
 def _move_batch(batch: dict[str, Any], device: torch.device) -> dict[str, Tensor]:
     return {
         name: batch[name].to(device, non_blocking=True)
-        for name in ("image", "state", "actions", "action_mask")
+        for name in ("image", "state", "actions", "action_mask", "sample_weight")
     }
 
 
@@ -507,6 +601,13 @@ def _schedule(config: TrainConfig) -> Any:
         return 0.5 * (1.0 + math.cos(math.pi * min(progress, 1.0)))
 
     return multiplier
+
+
+def _effective_kl_weight(config: TrainConfig, global_step: int) -> float:
+    if config.kl_warmup_steps == 0:
+        return config.kl_weight
+    progress = min((global_step + 1) / config.kl_warmup_steps, 1.0)
+    return config.kl_weight * progress
 
 
 def _resume_path(run_dir: Path, resume: str) -> Path | None:

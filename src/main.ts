@@ -242,14 +242,28 @@ function updateSensorCameras(): void {
 }
 
 function commandFromInference(): ControlCommand | null {
-  const result = inference.predict(recorder.captureFrontImage(), languageIdForIntent());
+  if (!inference.connected) {
+    inferenceEnabled = false;
+    awaitingStart = true;
+    status = 'Inference server disconnected';
+    return { throttle: 0, brake: 0, steer: 0 };
+  }
+  const result = inference.predict({
+    image: recorder.captureFrontImage(),
+    instruction: selectedLanguageText(),
+    state: [ego.speed, ego.steering, latestCommand.throttle, latestCommand.brake],
+  });
   if (!result) return null;
-  const actions = result.actions;
-  return {
-    throttle: actions.forward ? 0.8 : 0,
-    brake: actions.backward ? 0.5 : 0,
-    steer: actions.left ? -0.75 : actions.right ? 0.75 : 0,
-  };
+  const raw = result.rawAction;
+  if (
+    Math.abs(ego.speed) < 0.05
+    && raw.throttle < 0.01
+    && raw.brake < 0.01
+    && Math.abs(raw.steer) < 0.01
+  ) {
+    status = `ACT ${result.latencyMs.toFixed(0)} ms: checkpoint predicts idle at startup`;
+  }
+  return result.action;
 }
 
 function actionVectorFromCommand(command: ControlCommand): ActionVector {
@@ -277,6 +291,7 @@ function setLanguageIntent(id: string): void {
 }
 
 function setRunMode(mode: RunMode): void {
+  inference.reset();
   runMode = mode;
   expertEnabled = false;
   inferenceEnabled = false;
@@ -369,6 +384,7 @@ function startEpisode(mode: 'manual' | 'expert' | 'inference'): void {
 }
 
 function resetEpisode(message: string): void {
+  inference.reset();
   ego.reset();
   expert.reset();
   maxRouteProgress = 0;
@@ -740,6 +756,11 @@ Object.assign(window, {
       triangles: renderer.info.render.triangles,
       quality: qualityManager.current.id,
       pixelRatio: renderer.getPixelRatio(),
+    }),
+    getInferenceStats: () => ({
+      connected: inference.connected,
+      latest: inference.latest,
+      enabled: inferenceEnabled,
     }),
   },
 });

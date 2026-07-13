@@ -8,9 +8,13 @@
   },
   "scripts": {
     "dev": "vite --host 0.0.0.0",
+    "inference": "bash scripts/start-inference.sh",
+    "model:download": "cd act_training && python3 scripts/download_hf_run.py --run-name act-driving-v1",
     "build": "tsc && vite build",
     "test": "vitest run",
     "smoke": "node scripts/smoke-playwright.mjs",
+    "smoke:inference": "node scripts/smoke-inference-playwright.mjs",
+    "eval:closed-loop": "ACT_REQUIRE_MOVEMENT=1 node scripts/smoke-inference-playwright.mjs",
     "audit": "node scripts/quality-audit.mjs",
     "dataset:manifest": "node scripts/generate-dataset-manifest.mjs",
     "dataset:collect": "node --no-warnings scripts/dataset-supervisor.mjs",

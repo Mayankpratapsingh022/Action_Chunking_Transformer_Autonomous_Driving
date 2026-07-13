@@ -32,7 +32,7 @@ def training_state(
     global_step: int,
     epoch: int,
     elapsed_seconds: float,
-    best_validation_mae: float,
+    best_validation_score: float,
     best_step: int,
     best_validation_metrics: dict[str, Any] | None,
     history: dict[str, list[dict[str, Any]]],
@@ -45,7 +45,7 @@ def training_state(
         "global_step": global_step,
         "epoch": epoch,
         "elapsed_seconds": elapsed_seconds,
-        "best_validation_mae": best_validation_mae,
+        "best_validation_score": best_validation_score,
         "best_step": best_step,
         "best_validation_metrics": best_validation_metrics,
         "history": history,
@@ -74,4 +74,3 @@ def save_inference_weights(model: nn.Module, path: str | Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     weights = {name: value.detach().cpu().contiguous() for name, value in model.state_dict().items()}
     save_file(weights, destination, metadata={"format": "pt"})
-

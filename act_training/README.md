@@ -18,10 +18,20 @@ A language-conditioned deep-learning policy that predicts short sequences of dri
 
 The policy is built around an **Action Chunking Transformer (ACT)**. Instead of predicting one steering command at a time, it predicts the next 20 controls together. At the dataset rate of 10 Hz, each chunk covers two seconds of driving. The controller executes a few actions, observes the road again, and replans.
 
-> **Project status:** the dataset and training code are ready, but no GPU training run has been launched. There is no trained checkpoint or claimed driving result yet.
+> **Project status:** `act-driving-v1` completed 10,000 steps, but closed-loop testing exposed longitudinal median collapse: it predicts almost no throttle or brake. The v2 training code now uses balanced activity and magnitude heads, critical-window weighting, and collapse gates. `act-driving-v2` has not been trained yet.
 
 <!-- TRAINING_RESULTS_START -->
-Training has not been run yet. This section is replaced with measured validation and test results after a successful run.
+Latest completed run: `act-driving-v1`.
+
+| Metric | Value |
+| --- | ---: |
+| Best validation mean action MAE | 0.06392 |
+| Test mean action MAE | 0.06696 |
+| Test throttle MAE | 0.09242 |
+| Test brake MAE | 0.04452 |
+| Test steering MAE | 0.06395 |
+| Test brake accuracy | 91.65% |
+| Test steering-direction accuracy | 65.64% |
 <!-- TRAINING_RESULTS_END -->
 
 ## The learning problem
@@ -73,6 +83,10 @@ vision + state + language + latent tokens
           Transformer action decoder
                     |
                     v
+       activity + magnitude heads for throttle/brake
+                + steering head
+                         |
+                         v
        throttle, brake, steering chunk
 ```
 
@@ -94,13 +108,21 @@ During training, a posterior transformer reads the target action chunk and predi
 
 ## Training objective
 
-The policy uses masked action reconstruction plus KL regularization:
+The first run used plain masked L1. Because most longitudinal targets are zero, that objective rewarded a near-zero median policy even though aggregate MAE looked reasonable. V2 separates longitudinal activity from magnitude:
 
 ```text
-loss = masked_L1(predicted_actions, expert_actions) + beta * KL(q(z|a) || N(0, I))
+activity = balanced_BCE(throttle_active, brake_active)
+magnitude = SmoothL1(throttle, brake | target is active)
+steering = weighted_SmoothL1(steering, extra weight on turns)
+overlap = mean(P(throttle active) * P(brake active))
+
+loss = activity + magnitude + 2 * steering + 0.25 * overlap
+     + beta * KL(q(z|a) || N(0, I))
 ```
 
-The default KL weight is `10.0`. Tail positions near the end of an episode are padded, then removed from both the loss and evaluation metrics with an action mask.
+Throttle and brake positive weights are calculated from the training split and capped at `12`. Samples covering a stationary launch, braking, turning, throttle use, or recovery maneuver receive additional weight. The strongest applicable weight is used, so overlapping cases do not multiply into unstable loss values.
+
+KL starts near zero and warms to `0.1` over 2,000 steps. Tail positions near episode boundaries are padded and excluded from every loss and metric. The original setup remains in [`configs/v1.json`](configs/v1.json) for reproduction only.
 
 The default optimization setup is:
 
@@ -117,6 +139,7 @@ The default optimization setup is:
 | Precision | BF16 |
 | Float32 matmul | TF32 enabled |
 | Gradient clipping | `1.0` |
+| KL weight | `0.1`, warmed over 2,000 steps |
 | Validation interval | 500 steps |
 | Checkpoint interval | 500 steps |
 
@@ -151,13 +174,14 @@ The 90 deliberately unsafe episodes under `raw/failures/` are not behavior-cloni
 ```text
 act-autonomous-driving/
 |-- configs/
-|   `-- base.json                 # Reproducible training defaults
+|   |-- base.json                 # V2 balanced-objective defaults
+|   `-- v1.json                   # Original objective for reproduction only
 |-- src/urban_act/
 |   |-- config.py                 # Validated training configuration
 |   |-- data.py                   # Video streaming and action chunks
 |   |-- model.py                  # Language-conditioned ACT model
-|   |-- losses.py                 # Masked L1 and KL loss
-|   |-- metrics.py                # Open-loop driving metrics
+|   |-- losses.py                 # Balanced activity, magnitude, steering, and KL losses
+|   |-- metrics.py                # Activity, active-action, collapse, and open-loop metrics
 |   |-- plots.py                  # Training and prediction figures
 |   |-- checkpoints.py            # Resume and inference weights
 |   |-- train.py                  # Training and evaluation loop
@@ -165,12 +189,15 @@ act-autonomous-driving/
 |   `-- hub.py                    # Hugging Face model publishing
 |-- tests/                        # CPU unit tests with dummy encoders
 |-- scripts/runpod_bootstrap.sh  # Remote dependency and training bootstrap
+|-- scripts/check_v2_objective.py # CPU collapse-regression check
 |-- scripts/download_hf_run.py   # Copy a completed Hub run back locally
+|-- inference_server.py          # Local HTTP health and WebSocket inference server
 |-- runpod_main.py               # One-command trainer for a manually created Pod
 |-- runpod_train.py              # Standalone persistent-volume trainer
 |-- runpod_launcher.py           # RunPod REST lifecycle client
 |-- modal_app.py                  # H100 training entrypoint
 |-- requirements-local.txt        # Local Modal and Hub tools
+|-- requirements-inference.txt    # Local model-serving environment
 |-- requirements-runpod.txt       # Packages not supplied by the GPU image
 |-- requirements.txt              # Full training environment
 `-- README.md
@@ -206,7 +233,7 @@ cd Action_Chunking_Transformer_Autonomous_Driving/act_training
 
 The new manual entrypoint must be committed and pushed before cloning.
 
-### 3. Inspect and train
+### 3. Verify and run a 2,000-step pilot
 
 The dry run prints paths and arguments without installing packages or starting training:
 
@@ -214,15 +241,22 @@ The dry run prints paths and arguments without installing packages or starting t
 python3 runpod_main.py --dry-run
 ```
 
-Start a persistent terminal session and launch the full H100 profile:
+Run the CPU objective check before spending GPU time:
+
+```bash
+PYTHONPATH=src python3 scripts/check_v2_objective.py
+```
+
+Start a persistent terminal session and launch a pilot without publishing it:
 
 ```bash
 tmux new -s act-training
 
 python3 runpod_main.py \
-  --run-name act-driving-v1 \
-  --max-steps 10000 \
-  --batch-size 64
+  --run-name act-driving-v2 \
+  --max-steps 2000 \
+  --batch-size 64 \
+  --no-push-to-hub
 ```
 
 Detach with `Ctrl+B`, then `D`. Reattach later with:
@@ -233,17 +267,36 @@ tmux attach -t act-training
 
 The first invocation installs the non-Torch requirements and the CUDA 12.8 TorchVision wheel. It then verifies the GPU before downloading the dataset. The entrypoint disables RunPod's deprecated `HF_HUB_ENABLE_HF_TRANSFER` default and uses standard HTTP instead of Xet by default, avoiding optional-transfer and Xet token failures for this small dataset. Dataset downloads retry transient Hub failures and honor the resolver reset delay after a `429` response. Set `HF_HUB_DISABLE_XET=0` before launch to opt back into Xet. If the selected template does not already contain Torch 2.8, add `--install-pytorch`. On later invocations, `--skip-setup` avoids the pip checks.
 
+After the pilot, inspect the gates:
+
+```bash
+jq '{best_step, validation: .validation.quality_gates, test: .test.quality_gates}' \
+  /workspace/act-driving/artifacts/runs/act-driving-v2/metrics.json
+```
+
+If throttle, brake, startup, steering, and zero-baseline gates pass or are clearly improving, continue the same checkpoint to 10,000 steps and enable publishing:
+
+```bash
+tmux new -s act-training
+
+python3 runpod_main.py \
+  --skip-setup \
+  --run-name act-driving-v2 \
+  --max-steps 10000 \
+  --batch-size 64
+```
+
 ### 4. Monitor and resume
 
 From another RunPod web terminal:
 
 ```bash
-tail -F /workspace/act-driving/logs/act-driving-v1.log
+tail -F /workspace/act-driving/logs/act-driving-v2.log
 watch -n 2 nvidia-smi
-cat /workspace/act-driving/artifacts/status/act-driving-v1.json
+cat /workspace/act-driving/artifacts/status/act-driving-v2.json
 ```
 
-Rerunning the same command resumes from `/workspace/act-driving/artifacts/runs/act-driving-v1/last.pt`. A successful run evaluates the best checkpoint and publishes the model, tokenizer, metrics, history, and plots to Hugging Face.
+Rerunning with the same run name resumes from `/workspace/act-driving/artifacts/runs/act-driving-v2/last.pt`. The trainer always saves local artifacts. It only promotes the model, tokenizer, metrics, history, and plots to Hugging Face when both validation and test quality gates pass.
 
 ## Automated RunPod API setup
 
@@ -322,7 +375,7 @@ python3 runpod_launcher.py watch
 python3 runpod_launcher.py logs
 ```
 
-`watch` reports lifecycle status and hourly cost. `logs` prints the RunPod dashboard link; container logs carry the trainer's step, percent, loss, learning rate, elapsed time, ETA, and validation events. The same output is retained at `/workspace/act-driving/logs/act-driving-v1.log`.
+`watch` reports lifecycle status and hourly cost. `logs` prints the RunPod dashboard link; container logs carry the trainer's step, percent, component losses, learning rate, elapsed time, ETA, and validation events. The same output is retained at `/workspace/act-driving/logs/act-driving-v2.log`.
 
 The training command exits after final evaluation and Hugging Face publishing, releasing the GPU. Verify that the Pod reaches `EXITED`, then delete the Pod record:
 
@@ -334,15 +387,15 @@ RunPod network-volume Pods cannot be stopped and restarted in place. Termination
 
 ### 6. Resume or download
 
-To resume, launch again with the same run name, Git branch, and network volume. `resume: "auto"` loads `/workspace/act-driving/artifacts/runs/act-driving-v1/last.pt` with the optimizer, scheduler, scaler, step, and random-number states.
+To resume, launch again with the same run name, Git branch, and network volume. `resume: "auto"` loads `/workspace/act-driving/artifacts/runs/act-driving-v2/last.pt` with the optimizer, scheduler, scaler, step, and random-number states.
 
 After a successful run, copy the published artifact set back to this machine:
 
 ```bash
-python3 scripts/download_hf_run.py --run-name act-driving-v1
+python3 scripts/download_hf_run.py --run-name act-driving-v2
 ```
 
-This creates `artifacts/act-driving-v1/`, the layout expected by the inference API.
+This creates `artifacts/act-driving-v2/`. Point `ACT_ARTIFACT_DIR` at this directory when starting the inference API.
 
 ## Modal setup
 
@@ -370,13 +423,13 @@ The following command is ready for the first run, but it has not been executed:
 ./scripts/start_h100_tmux.sh
 ```
 
-The launcher reads `.env`, starts a detached `act-h100` tmux session, and writes output to `logs/act-driving-v1.log`. Only `HF_TOKEN` is passed to the GPU container; local Modal credentials are used only by the CLI.
+The launcher reads `.env`, starts a detached `act-h100` tmux session, and writes output to `logs/act-driving-v2.log`. Only `HF_TOKEN` is passed to the GPU container; local Modal credentials are used only by the CLI.
 
 Override the two settings most likely to change during an initial experiment:
 
 ```bash
 ./scripts/run_modal.sh \
-  --run-name act-driving-v1 \
+  --run-name act-driving-v2 \
   --max-steps 10000 \
   --batch-size 64
 ```
@@ -403,14 +456,14 @@ When training finishes, the local entrypoint downloads the run automatically. A 
 
 ```bash
 modal volume get urban-vla-act-artifacts \
-  runs/act-driving-v1 \
-  artifacts/act-driving-v1
+  runs/act-driving-v2 \
+  artifacts/act-driving-v2
 ```
 
 ## Artifacts
 
 ```text
-artifacts/act-driving-v1/
+artifacts/act-driving-v2/
 |-- best.pt                       # Best resumable validation checkpoint
 |-- last.pt                       # Latest resumable checkpoint
 |-- model.safetensors             # Inference weights
@@ -431,22 +484,57 @@ The completed run is also pushed to Hugging Face. Each run remains under `runs/<
 
 ## Evaluation
 
-The trainer selects the best checkpoint using validation mean action MAE. It reads the test split once, after model selection.
+The trainer selects the best checkpoint with a collapse-resistant validation score. It combines active-action MAE with throttle F1, brake F1, steering-direction accuracy, and stationary-launch throttle recall. It reads the test split once, after model selection.
 
 Reported metrics include:
 
-- masked action L1 over the complete chunk
 - throttle, brake, and steering MAE and RMSE
+- active-target MAE for throttle, brake, and steering
+- zero-action baseline MAE and relative improvement
+- throttle and brake precision, recall, F1, accuracy, and confusion counts
+- stationary-launch throttle recall and mean predicted throttle
 - steering-direction accuracy for meaningful turns
-- braking classification accuracy
 - simultaneous throttle-and-brake rate
 - action MAE for each language intent
+- an explicit `collapse_detected` flag and per-gate pass/fail results
+
+The default publication gates require at least 80% stationary-launch throttle recall, 55% throttle recall, 55% brake recall, 65% steering-direction accuracy, a 5% MAE improvement over the all-zero baseline for both throttle and brake, and no more than 1% simultaneous throttle/brake actions. A run that misses a gate is retained on the Pod for diagnosis but is not promoted to the Hugging Face model root.
 
 These are **open-loop imitation metrics**. A low error means the policy resembles the recorded expert on held-out frames. It does not prove that the vehicle can finish a route.
 
 The next evaluation stage must run the trained policy inside the simulator and measure route success, collisions, off-road time, traffic-light violations, pedestrian violations, control smoothness, and recovery success. Until that closed-loop evaluation exists, the repository should not claim autonomous-driving performance.
 
-## Inference API
+The first simulator smoke run connected successfully and produced MPS predictions in roughly 30 ms, but `act-driving-v1` remained stationary. Direct checks on held-out dataset frames confirmed that the throttle and brake heads predict values near zero even when the expert target is active. The prediction plots show this longitudinal median collapse as well. Steering retains partial signal, but this checkpoint is not a usable closed-loop driving policy. The runtime does not add heuristic throttle because that would mask the learned-policy result.
+
+## Simulator inference
+
+Download the completed artifact set:
+
+```bash
+python3 scripts/download_hf_run.py --run-name act-driving-v1
+```
+
+Create an inference environment when needed:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements-inference.txt
+```
+
+From the repository root, start the WebSocket model server:
+
+```bash
+npm run inference
+```
+
+Start Vite in a second terminal with `npm run dev`, open the printed URL, and press `I`. The client sends the current camera image, instruction, and `[speed, steering, previous throttle, previous brake]` state. The server returns continuous `[throttle, brake, steering]` controls and keeps a three-step receding horizon before predicting a fresh 20-action chunk.
+
+Readiness and loaded model details are available at `http://localhost:8000/health`.
+
+From the repository root, `npm run smoke:inference` checks the browser-to-model protocol. `npm run eval:closed-loop` also requires nonzero vehicle movement; it intentionally remains failing for `act-driving-v1` until a corrected checkpoint replaces it.
+
+## Python inference API
 
 After a checkpoint has been downloaded:
 
@@ -478,9 +566,10 @@ These checks stay on the CPU. They do not request a RunPod or Modal GPU and do n
 ```bash
 python -m compileall modal_app.py runpod_launcher.py runpod_main.py runpod_train.py src tests scripts
 python -m pytest
+PYTHONPATH=src python scripts/check_v2_objective.py
 ```
 
-The tests cover configuration validation, dataset split handling, failure-data exclusion, action bounds, deterministic inference, masked loss, and gradient flow through the ACT policy.
+The tests cover configuration validation, dataset split handling, failure-data exclusion, critical-window weights, v1 checkpoint compatibility, bounded actions, deterministic inference, balanced loss, collapse detection, publication gates, and gradient flow through the ACT policy.
 
 ## Scope and safety
 

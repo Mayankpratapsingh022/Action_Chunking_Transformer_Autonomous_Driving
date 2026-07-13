@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -9,22 +10,40 @@ import torch
 from safetensors.torch import load_file
 from torch import Tensor
 from torchvision.transforms.functional import resize
-from transformers import AutoTokenizer
+from transformers import AutoConfig, AutoModel, AutoTokenizer
 
 from urban_act.model import LanguageConditionedACT, ModelConfig
 
 
 class ACTPolicy:
-    def __init__(self, artifact_dir: str | Path, *, device: str | None = None) -> None:
+    def __init__(
+        self,
+        artifact_dir: str | Path,
+        *,
+        device: str | None = None,
+        cache_dir: str | Path | None = None,
+    ) -> None:
         root = Path(artifact_dir)
         raw_config = json.loads((root / "config.json").read_text())
         raw_config.pop("architectures", None)
         raw_config.pop("model_type", None)
         self.config = ModelConfig.from_dict(raw_config)
-        self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+        self.device = _select_device(device)
+        cache_root = Path(cache_dir) if cache_dir is not None else root.parent / ".cache" / "huggingface"
+        cache_root.mkdir(parents=True, exist_ok=True)
         self.tokenizer = AutoTokenizer.from_pretrained(root / "tokenizer")
-        self.model = LanguageConditionedACT(self.config)
-        self.model.load_state_dict(load_file(root / "model.safetensors", device=str(self.device)))
+        try:
+            text_config = AutoConfig.from_pretrained(
+                self.config.text_model_name,
+                cache_dir=cache_root,
+                local_files_only=True,
+            )
+        except OSError:
+            text_config = AutoConfig.from_pretrained(self.config.text_model_name, cache_dir=cache_root)
+        text_encoder = AutoModel.from_config(text_config)
+        runtime_config = replace(self.config, pretrained_vision=False)
+        self.model = LanguageConditionedACT(runtime_config, text_encoder=text_encoder)
+        self.model.load_state_dict(load_file(root / "model.safetensors", device="cpu"))
         self.model.to(self.device).eval()
 
     @torch.inference_mode()
@@ -84,10 +103,19 @@ def _autocast(device: torch.device) -> Any:
     return torch.autocast(device_type="cuda", dtype=torch.bfloat16) if device.type == "cuda" else _NoOpContext()
 
 
+def _select_device(requested: str | None) -> torch.device:
+    if requested and requested != "auto":
+        return torch.device(requested)
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
 class _NoOpContext:
     def __enter__(self) -> None:
         return None
 
     def __exit__(self, *_: Any) -> None:
         return None
-

@@ -11,6 +11,7 @@ from transformers import AutoModel
 
 @dataclass(slots=True)
 class ModelConfig:
+    policy_version: str = "v2"
     image_size: int = 128
     state_dim: int = 4
     action_dim: int = 3
@@ -28,12 +29,15 @@ class ModelConfig:
     pretrained_vision: bool = True
     state_mean: tuple[float, ...] = (0.0, 0.0, 0.0, 0.0)
     state_std: tuple[float, ...] = (1.0, 1.0, 1.0, 1.0)
+    activity_probability_threshold: float = 0.5
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, values: dict[str, Any]) -> ModelConfig:
+        values = dict(values)
+        values.setdefault("policy_version", "v1")
         for name in ("state_mean", "state_std"):
             if name in values:
                 values[name] = tuple(values[name])
@@ -110,7 +114,16 @@ class LanguageConditionedACT(nn.Module):
             num_layers=config.decoder_layers,
             norm=nn.LayerNorm(config.d_model),
         )
-        self.action_head = nn.Linear(config.d_model, config.action_dim)
+        if config.policy_version == "v1":
+            self.action_head = nn.Linear(config.d_model, config.action_dim)
+        elif config.policy_version == "v2":
+            self.action_activity_head = nn.Linear(config.d_model, 2)
+            self.action_magnitude_head = nn.Linear(config.d_model, 2)
+            self.steering_head = nn.Linear(config.d_model, 1)
+            with torch.no_grad():
+                self.action_activity_head.bias.copy_(torch.tensor((-0.25, -2.0)))
+        else:
+            raise ValueError(f"Unknown policy version: {config.policy_version}")
 
         self.posterior_cls = nn.Parameter(torch.empty(1, 1, config.d_model))
         self.posterior_action_projection = nn.Linear(config.action_dim, config.d_model)
@@ -133,12 +146,8 @@ class LanguageConditionedACT(nn.Module):
 
         self.register_buffer("state_mean", torch.tensor(config.state_mean, dtype=torch.float32))
         self.register_buffer("state_std", torch.tensor(config.state_std, dtype=torch.float32))
-        self.register_buffer(
-            "image_mean", torch.tensor((0.485, 0.456, 0.406), dtype=torch.float32).view(1, 3, 1, 1)
-        )
-        self.register_buffer(
-            "image_std", torch.tensor((0.229, 0.224, 0.225), dtype=torch.float32).view(1, 3, 1, 1)
-        )
+        self.register_buffer("image_mean", torch.tensor((0.485, 0.456, 0.406), dtype=torch.float32).view(1, 3, 1, 1))
+        self.register_buffer("image_std", torch.tensor((0.229, 0.224, 0.225), dtype=torch.float32).view(1, 3, 1, 1))
         self._reset_parameters()
 
     def _reset_parameters(self) -> None:
@@ -178,9 +187,7 @@ class LanguageConditionedACT(nn.Module):
         vision_map = self.vision_projection(self.vision_backbone(image_values))
         vision_tokens = vision_map.flatten(2).transpose(1, 2)
         if vision_tokens.shape[1] != self.vision_position.shape[1]:
-            raise ValueError(
-                f"Expected {self.vision_position.shape[1]} vision tokens, got {vision_tokens.shape[1]}"
-            )
+            raise ValueError(f"Expected {self.vision_position.shape[1]} vision tokens, got {vision_tokens.shape[1]}")
 
         language_hidden = self._encode_language(input_ids, attention_mask)
         language_token = self.language_projection(language_hidden).unsqueeze(1)
@@ -202,16 +209,37 @@ class LanguageConditionedACT(nn.Module):
 
         queries = self.action_queries.expand(batch_size, -1, -1)
         decoded = self.action_decoder(queries, memory)
-        raw_actions = self.action_head(decoded)
-        actions = torch.stack(
-            (
-                raw_actions[..., 0].sigmoid(),
-                raw_actions[..., 1].sigmoid(),
-                raw_actions[..., 2].tanh(),
-            ),
-            dim=-1,
-        )
-        return {"actions": actions, "posterior_mean": mean, "posterior_log_variance": log_variance}
+        output = self._decode_actions(decoded)
+        output.update({"posterior_mean": mean, "posterior_log_variance": log_variance})
+        return output
+
+    def _decode_actions(self, decoded: Tensor) -> dict[str, Tensor]:
+        if self.config.policy_version == "v1":
+            raw_actions = self.action_head(decoded)
+            actions = torch.stack(
+                (
+                    raw_actions[..., 0].sigmoid(),
+                    raw_actions[..., 1].sigmoid(),
+                    raw_actions[..., 2].tanh(),
+                ),
+                dim=-1,
+            )
+            return {"actions": actions, "raw_actions": raw_actions}
+
+        activity_logits = self.action_activity_head(decoded)
+        activity_probabilities = activity_logits.sigmoid()
+        magnitudes = self.action_magnitude_head(decoded).sigmoid()
+        active = activity_probabilities >= self.config.activity_probability_threshold
+        longitudinal = torch.where(active, magnitudes, torch.zeros_like(magnitudes))
+        steering = self.steering_head(decoded).tanh()
+        actions = torch.cat((longitudinal, steering), dim=-1)
+        return {
+            "actions": actions,
+            "action_activity_logits": activity_logits,
+            "action_activity_probabilities": activity_probabilities,
+            "action_magnitudes": magnitudes,
+            "raw_actions": torch.cat((magnitudes, steering), dim=-1),
+        }
 
     def _encode_language(self, input_ids: Tensor, attention_mask: Tensor) -> Tensor:
         if self.freeze_text_encoder:

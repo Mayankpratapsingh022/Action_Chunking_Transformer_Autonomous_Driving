@@ -238,7 +238,7 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
 
     launch = commands.add_parser("launch", help="Create a billable GPU Pod and start training.")
-    launch.add_argument("--run-name", default=os.environ.get("ACT_RUN_NAME", "act-driving-v1"))
+    launch.add_argument("--run-name", default=os.environ.get("ACT_RUN_NAME", "act-driving-v2"))
     launch.add_argument("--gpu-type", action="append", dest="gpu_types")
     launch.add_argument("--network-volume-id", default=os.environ.get("RUNPOD_NETWORK_VOLUME_ID", ""))
     launch.add_argument("--hf-secret-name", default=os.environ.get("RUNPOD_HF_SECRET_NAME", "huggingface_token"))
@@ -263,7 +263,7 @@ def build_parser() -> argparse.ArgumentParser:
         if command == "watch":
             subparser.add_argument("--interval", type=float, default=15.0)
         elif command == "logs":
-            subparser.add_argument("--run-name", default=os.environ.get("ACT_RUN_NAME", "act-driving-v1"))
+            subparser.add_argument("--run-name", default=os.environ.get("ACT_RUN_NAME", "act-driving-v2"))
 
     terminate = commands.add_parser("terminate", help="Permanently delete a Pod, preserving its network volume.")
     terminate.add_argument("--pod-id")

@@ -26,6 +26,17 @@ class EpisodeRecord:
     directory: Path
 
 
+@dataclass(frozen=True, slots=True)
+class CriticalWindowConfig:
+    activity_threshold: float
+    steering_threshold: float
+    startup_weight: float
+    throttle_weight: float
+    brake_weight: float
+    turn_weight: float
+    recovery_weight: float
+
+
 def load_episode_records(dataset_root: str | Path, split: str) -> list[EpisodeRecord]:
     if split not in SPLIT_SEEDS:
         raise ValueError(f"Unknown split: {split}")
@@ -79,6 +90,53 @@ def compute_state_statistics(records: Iterable[EpisodeRecord]) -> dict[str, list
     return {"mean": mean.tolist(), "std": np.sqrt(variance).tolist(), "count": count}
 
 
+def compute_action_statistics(
+    records: Iterable[EpisodeRecord],
+    *,
+    activity_threshold: float,
+    positive_weight_cap: float,
+) -> dict[str, Any]:
+    count = 0
+    active_count = np.zeros(2, dtype=np.int64)
+    absolute_total = np.zeros(3, dtype=np.float64)
+    for record in records:
+        for line in (record.directory / "telemetry.jsonl").read_text().splitlines():
+            if not line:
+                continue
+            action = np.asarray(json.loads(line)["action"], dtype=np.float64)
+            active_count += action[:2] > activity_threshold
+            absolute_total += np.abs(action)
+            count += 1
+    if count == 0:
+        raise RuntimeError("Cannot compute action statistics from an empty dataset")
+    inactive_count = count - active_count
+    positive_weights = np.minimum(
+        inactive_count / np.maximum(active_count, 1),
+        positive_weight_cap,
+    )
+    return {
+        "count": count,
+        "activity_threshold": activity_threshold,
+        "active_count": {
+            "throttle": int(active_count[0]),
+            "brake": int(active_count[1]),
+        },
+        "active_fraction": {
+            "throttle": float(active_count[0] / count),
+            "brake": float(active_count[1] / count),
+        },
+        "positive_weights": {
+            "throttle": float(positive_weights[0]),
+            "brake": float(positive_weights[1]),
+        },
+        "zero_baseline_mae": {
+            "throttle": float(absolute_total[0] / count),
+            "brake": float(absolute_total[1] / count),
+            "steering": float(absolute_total[2] / count),
+        },
+    }
+
+
 class UrbanEpisodeStream(IterableDataset[dict[str, Any]]):
     """Decode each MP4 once per epoch and emit frame-aligned future action chunks."""
 
@@ -92,6 +150,7 @@ class UrbanEpisodeStream(IterableDataset[dict[str, Any]]):
         shuffle: bool,
         shuffle_buffer: int,
         seed: int,
+        critical_windows: CriticalWindowConfig | None = None,
     ) -> None:
         super().__init__()
         if image_size < 32:
@@ -103,6 +162,7 @@ class UrbanEpisodeStream(IterableDataset[dict[str, Any]]):
         self.shuffle = shuffle
         self.shuffle_buffer = shuffle_buffer
         self.seed = seed
+        self.critical_windows = critical_windows
         self.epoch = 0
 
     def set_epoch(self, epoch: int) -> None:
@@ -126,11 +186,7 @@ class UrbanEpisodeStream(IterableDataset[dict[str, Any]]):
             yield from samples
 
     def _episode_samples(self, record: EpisodeRecord) -> Iterator[dict[str, Any]]:
-        rows = [
-            json.loads(line)
-            for line in (record.directory / "telemetry.jsonl").read_text().splitlines()
-            if line
-        ]
+        rows = [json.loads(line) for line in (record.directory / "telemetry.jsonl").read_text().splitlines() if line]
         actions = np.asarray([row["action"] for row in rows], dtype=np.float32)
         states = np.asarray([row["observation"]["state"] for row in rows], dtype=np.float32)
         decoded = 0
@@ -149,6 +205,12 @@ class UrbanEpisodeStream(IterableDataset[dict[str, Any]]):
                 action_mask = np.zeros(self.chunk_size, dtype=np.bool_)
                 action_chunk[:valid] = actions[frame_index:end]
                 action_mask[:valid] = True
+                sample_weight = _critical_window_weight(
+                    states[frame_index],
+                    action_chunk[:valid],
+                    record.kind,
+                    self.critical_windows,
+                )
                 resized_frame = frame.reformat(
                     width=self.image_size,
                     height=self.image_size,
@@ -161,8 +223,10 @@ class UrbanEpisodeStream(IterableDataset[dict[str, Any]]):
                     "state": torch.from_numpy(states[frame_index]),
                     "actions": torch.from_numpy(action_chunk),
                     "action_mask": torch.from_numpy(action_mask),
+                    "sample_weight": torch.tensor(sample_weight, dtype=torch.float32),
                     "instruction": record.instruction,
                     "task_id": record.task_id,
+                    "episode_kind": record.kind,
                     "episode_id": record.episode_id,
                     "frame_index": frame_index,
                 }
@@ -174,9 +238,9 @@ class UrbanEpisodeStream(IterableDataset[dict[str, Any]]):
 
 
 def collate_samples(samples: list[dict[str, Any]]) -> dict[str, Any]:
-    tensor_fields = ("image", "state", "actions", "action_mask")
+    tensor_fields = ("image", "state", "actions", "action_mask", "sample_weight")
     batch: dict[str, Any] = {name: torch.stack([sample[name] for sample in samples]) for name in tensor_fields}
-    for name in ("instruction", "task_id", "episode_id", "frame_index"):
+    for name in ("instruction", "task_id", "episode_kind", "episode_id", "frame_index"):
         batch[name] = [sample[name] for sample in samples]
     return batch
 
@@ -215,3 +279,25 @@ def _buffered_shuffle(
         buffer[index] = sample
     rng.shuffle(buffer)
     yield from buffer
+
+
+def _critical_window_weight(
+    state: np.ndarray,
+    actions: np.ndarray,
+    episode_kind: str,
+    config: CriticalWindowConfig | None,
+) -> float:
+    if config is None or len(actions) == 0:
+        return 1.0
+    weight = 1.0
+    if abs(float(state[0])) < 0.5 and float(actions[0, 0]) > config.activity_threshold:
+        weight = max(weight, config.startup_weight)
+    if np.any(actions[:, 0] > config.activity_threshold):
+        weight = max(weight, config.throttle_weight)
+    if np.any(actions[:, 1] > config.activity_threshold):
+        weight = max(weight, config.brake_weight)
+    if np.any(np.abs(actions[:, 2]) > config.steering_threshold):
+        weight = max(weight, config.turn_weight)
+    if episode_kind == "recovery":
+        weight = max(weight, config.recovery_weight)
+    return weight

@@ -80,7 +80,7 @@ def train_on_modal(config_values: dict[str, Any]) -> dict[str, Any]:
 
 @app.local_entrypoint()
 def main(
-    run_name: str = "urban-act-v1",
+    run_name: str = "act-driving-v2",
     max_steps: int = 10_000,
     batch_size: int = 64,
     config_path: str = "configs/base.json",

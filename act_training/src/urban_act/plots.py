@@ -35,19 +35,37 @@ def plot_training_curves(history: dict[str, list[dict[str, Any]]], path: Path) -
     if train:
         steps = [row["step"] for row in train]
         axes[0].plot(steps, [row["loss"] for row in train], label="total")
-        axes[0].plot(steps, [row["reconstruction_loss"] for row in train], label="action L1")
+        axes[0].plot(steps, [row["reconstruction_loss"] for row in train], label="reconstruction")
+        for key, label in (
+            ("activity_loss", "activity"),
+            ("magnitude_loss", "magnitude"),
+            ("steering_loss", "steering"),
+            ("overlap_loss", "throttle/brake overlap"),
+        ):
+            if key in train[0]:
+                axes[0].plot(steps, [row[key] for row in train], label=label, alpha=0.8)
         axes[0].plot(steps, [row["kl_loss"] for row in train], label="KL")
     axes[0].set(title="Training losses", xlabel="Step", ylabel="Loss")
     axes[0].legend()
     axes[0].grid(alpha=0.25)
 
     if validation:
+        validation_steps = [row["step"] for row in validation]
         axes[1].plot(
-            [row["step"] for row in validation],
+            validation_steps,
             [row["mean_action_mae"] for row in validation],
             color="#9467bd",
+            label="all-step MAE",
         )
-    axes[1].set(title="Validation action MAE", xlabel="Step", ylabel="MAE")
+        if "selection_score" in validation[0]:
+            axes[1].plot(
+                validation_steps,
+                [row["selection_score"] for row in validation],
+                color="#ff7f0e",
+                label="selection score",
+            )
+    axes[1].set(title="Validation policy quality", xlabel="Step", ylabel="Lower is better")
+    axes[1].legend()
     axes[1].grid(alpha=0.25)
     figure.tight_layout()
     figure.savefig(path, dpi=160)
@@ -55,11 +73,20 @@ def plot_training_curves(history: dict[str, list[dict[str, Any]]], path: Path) -
 
 
 def plot_action_mae(metrics: dict[str, Any], path: Path) -> None:
-    values = [metrics["action_mae"][name] for name in ACTION_NAMES]
+    values = np.asarray([metrics["action_mae"][name] for name in ACTION_NAMES])
+    active_values = np.asarray([metrics.get("active_action_mae", metrics["action_mae"])[name] for name in ACTION_NAMES])
+    baseline_values = np.asarray(
+        [metrics.get("zero_baseline_mae", metrics["action_mae"])[name] for name in ACTION_NAMES]
+    )
     figure, axis = plt.subplots(figsize=(7, 4.5))
-    bars = axis.bar(ACTION_NAMES, values, color=COLORS)
-    axis.bar_label(bars, fmt="%.4f", padding=4)
+    positions = np.arange(len(ACTION_NAMES))
+    width = 0.25
+    axis.bar(positions - width, values, width, label="all steps", color="#1f77b4")
+    axis.bar(positions, active_values, width, label="active targets", color="#ff7f0e")
+    axis.bar(positions + width, baseline_values, width, label="zero baseline", color="#7f7f7f")
+    axis.set_xticks(positions, ACTION_NAMES)
     axis.set(title="Test action error", ylabel="Mean absolute error")
+    axis.legend()
     axis.grid(axis="y", alpha=0.25)
     figure.tight_layout()
     figure.savefig(path, dpi=160)
@@ -114,4 +141,3 @@ def _write_empty_plot(path: Path, message: str) -> None:
     figure.tight_layout()
     figure.savefig(path, dpi=160)
     plt.close(figure)
-

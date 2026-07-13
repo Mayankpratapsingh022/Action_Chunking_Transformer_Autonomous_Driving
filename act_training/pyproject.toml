@@ -22,6 +22,11 @@ dependencies = [
 
 [project.optional-dependencies]
 modal = ["modal==1.2.1"]
+inference = [
+  "fastapi==0.119.1",
+  "pillow==10.4.0",
+  "uvicorn[standard]==0.38.0",
+]
 dev = ["pytest==8.4.2", "ruff==0.12.7"]
 
 [tool.setuptools.packages.find]
@@ -37,4 +42,3 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
-

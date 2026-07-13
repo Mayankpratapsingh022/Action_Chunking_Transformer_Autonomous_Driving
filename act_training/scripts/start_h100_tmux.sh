@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TRAINING_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SESSION_NAME="${TMUX_SESSION_NAME:-act-h100}"
-RUN_NAME="${RUN_NAME:-act-driving-v1}"
+RUN_NAME="${RUN_NAME:-act-driving-v2}"
 LOG_FILE="$TRAINING_DIR/logs/$RUN_NAME.log"
 
 if [[ ! "$RUN_NAME" =~ ^[A-Za-z0-9._-]+$ ]]; then

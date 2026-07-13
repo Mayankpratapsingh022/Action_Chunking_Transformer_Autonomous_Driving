@@ -12,12 +12,13 @@ An end-to-end research project for language-conditioned autonomous driving. The 
 | Automated expert and recovery controller | Working |
 | Dataset collection and validation | Complete |
 | Hugging Face dataset | Published |
-| Language-conditioned ACT training code | Ready and tested |
-| RunPod/Modal GPU training | Not started |
-| Trained checkpoint | Not available yet |
-| Closed-loop learned-policy evaluation | Pending |
+| Language-conditioned ACT training code | Complete and tested |
+| RunPod GPU training | V1 completed; v2 retraining code ready |
+| Trained checkpoint | V1 published but rejected by closed-loop launch test |
+| Local WebSocket inference | Implemented |
+| Closed-loop learned-policy evaluation | Integration works; v1 fails stationary launch |
 
-The status matters. This repository has a complete training path, but it does not claim that a learned policy can drive successfully yet. That claim has to wait for a real training run and closed-loop simulator evaluation.
+The first policy completed open-loop validation and test evaluation, then failed the stationary-launch closed-loop test. The corrected v2 objective and evaluation gates are implemented and locally tested; the next step is a new GPU run named `act-driving-v2`.
 
 ## Project flow
 
@@ -105,6 +106,42 @@ npm run dev
 
 Open the local URL printed by Vite, normally `http://localhost:5173`.
 
+### Run the trained policy
+
+The completed `act-driving-v1` model is published at [`Mayank022/urban-vla-language-act`](https://huggingface.co/Mayank022/urban-vla-language-act). Download it once; the ignored local artifact directory keeps the large weights out of Git:
+
+```bash
+npm run model:download
+```
+
+Install the Python inference dependencies when they are not already available:
+
+```bash
+cd act_training
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements-inference.txt
+cd ..
+```
+
+Run the model server in one terminal:
+
+```bash
+npm run inference
+```
+
+Run the simulator in a second terminal:
+
+```bash
+npm run dev
+```
+
+Open the Vite URL and press `I`, or select **Inference** and use the inference control. The browser sends the current `128 x 128` front-camera image, language instruction, speed, steering, previous throttle, and previous brake to `ws://localhost:8000/ws`. The server predicts a 20-step ACT chunk, executes three continuous controls, then replans from the latest observation.
+
+The local model server exposes a readiness check at [`http://localhost:8000/health`](http://localhost:8000/health). It selects CUDA, then Apple MPS, then CPU. Disconnecting the server stops learned-policy control instead of continuing with stale actions.
+
+With both processes running, `npm run smoke:inference` verifies the socket and a real model response. `npm run eval:closed-loop` additionally requires the vehicle to move and currently fails for the published v1 checkpoint, preserving the longitudinal-collapse result as an explicit regression test.
+
 ## Expert driving and recovery
 
 The automated expert is a rules-based controller, not a trained model. It follows the route, tracks the lane, manages speed, responds to scenario actors, and produces continuous expert actions.
@@ -185,15 +222,39 @@ The action transformer and CVAE learn from the driving dataset. ResNet-18 is fin
 
 The source videos remain at `256 x 256`. PyAV resizes frames to `128 x 128` while decoding, so there is no separate converted dataset and no additional copy stored on disk.
 
-The objective is:
+The v2 objective is:
 
 ```text
-loss = masked action L1 + beta * latent KL divergence
+loss = balanced longitudinal activity BCE
+     + active-only throttle/brake magnitude SmoothL1
+     + turn-weighted steering SmoothL1
+     + throttle/brake overlap penalty
+     + warmed latent KL divergence
 ```
 
-Padded actions at episode boundaries are excluded by a mask. During inference the CVAE latent is set to zero, making the predicted chunk deterministic for the same observation and instruction.
+Stationary launch, throttle, brake, turn, and recovery windows receive extra sample weight. Padded actions at episode boundaries are excluded by a mask. During inference the CVAE latent is set to zero, making the predicted chunk deterministic for the same observation and instruction.
 
 The full architecture, training defaults, artifact format, metrics, and inference API are documented in the [ACT training guide](act_training/README.md).
+
+### Trained result
+
+The best checkpoint occurred at step 10,000. Held-out test results were:
+
+| Metric | Result |
+| --- | ---: |
+| Mean action MAE | `0.06696` |
+| Throttle MAE | `0.09242` |
+| Brake MAE | `0.04452` |
+| Steering MAE | `0.06395` |
+| Brake accuracy | `91.65%` |
+| Steering-direction accuracy | `65.64%` |
+| Throttle/brake overlap rate | `0.00%` |
+
+Overtaking was the weakest held-out intent (`0.14000` MAE), followed by right turns (`0.09216`). Closed-loop runs should focus on those cases before extending training.
+
+The first closed-loop smoke run exposed a stronger limitation than aggregate MAE: `act-driving-v1` predicts near-zero throttle and brake, including on held-out startup frames whose target throttle is `1.0`. The published prediction plots show the same longitudinal collapse, while steering retains partial signal. This is consistent with plain L1 converging to the zero median of the action distribution. The WebSocket integration intentionally applies the learned policy rather than hiding the failure with an expert speed controller.
+
+V2 now uses separate activity and magnitude heads, class balancing from the training split, critical-window weights, active-action metrics, and mandatory publication gates. The old architecture remains loadable for comparison, but new training defaults use v2.
 
 ## Train on RunPod
 
@@ -202,10 +263,11 @@ The simplest RunPod workflow is manual: create an H100 or RTX PRO 6000 Pod in th
 ```bash
 cd /workspace/Action_Chunking_Transformer_Autonomous_Driving/act_training
 python3 runpod_main.py --dry-run
-python3 runpod_main.py --run-name act-driving-v1 --max-steps 10000 --batch-size 64
+PYTHONPATH=src python3 scripts/check_v2_objective.py
+python3 runpod_main.py --run-name act-driving-v2 --max-steps 2000 --batch-size 64 --no-push-to-hub
 ```
 
-`runpod_main.py` installs the remaining dependencies, validates CUDA, uses persistent `/workspace` paths, resumes checkpoints, streams logs, evaluates the best model, and pushes the completed artifact set to Hugging Face. The detailed manual setup is in the [ACT training guide](act_training/README.md#manual-runpod-training).
+Inspect the pilot gates, then resume the same run to 10,000 steps by removing `--no-push-to-hub` and adding `--skip-setup`. `runpod_main.py` installs the remaining dependencies, validates CUDA, uses persistent `/workspace` paths, resumes checkpoints, streams logs, evaluates the best model, and only promotes a checkpoint to Hugging Face when validation and test gates pass. The detailed manual setup is in the [ACT training guide](act_training/README.md#manual-runpod-training).
 
 The optional RunPod launcher creates an on-demand H100 Pod through the REST API. It clones this repository, trains from the published Hugging Face dataset, stores resumable checkpoints on a network volume, and publishes the completed model and plots to Hugging Face. It requires `--yes` before creating billable compute.
 
@@ -263,14 +325,17 @@ Training checkpoints are committed to a persistent Modal Volume every 500 steps.
 The Python trainer measures held-out action imitation with:
 
 - throttle, brake, and steering MAE and RMSE
+- active-action MAE and improvement over an all-zero baseline
+- throttle and brake precision, recall, F1, and confusion counts
+- stationary-launch throttle recall
 - steering-direction accuracy
-- braking classification accuracy
 - simultaneous throttle-and-brake rate
 - per-intent action MAE
+- collapse detection and quality-gate status
 
 These are open-loop metrics. They compare predicted controls with recorded expert controls, but a small error does not guarantee stable driving.
 
-A trained checkpoint still needs closed-loop evaluation for route completion, collisions, off-road time, traffic-light violations, pedestrian violations, recovery success, and control smoothness. The TypeScript inference client and the Python ACT artifact currently use different action interfaces, so a continuous-control serving adapter must be completed before that evaluation.
+A trained checkpoint still needs closed-loop evaluation for route completion, collisions, off-road time, traffic-light violations, pedestrian violations, recovery success, and control smoothness. The continuous-control WebSocket adapter is implemented; `npm run eval:closed-loop` remains an intentional failure for v1 and should be rerun after downloading v2.
 
 ## Repository structure
 
