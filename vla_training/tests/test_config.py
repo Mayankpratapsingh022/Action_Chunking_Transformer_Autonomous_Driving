@@ -11,9 +11,9 @@ def test_left_turn_config_loads() -> None:
     assert config.chunk_size == 20
     assert config.action_steps == 3
     assert not config.freeze_vision_encoder
+    assert config.rename_map == {"observation.images.front": "observation.images.camera1"}
 
 
 def test_invalid_action_horizon_is_rejected() -> None:
     with pytest.raises(ValueError, match="action_steps"):
         TrainConfig(chunk_size=3, action_steps=4).validate()
-

@@ -12,6 +12,7 @@ def test_new_training_command_uses_pretrained_smolvla(tmp_path: Path) -> None:
     assert "--policy.n_action_steps=3" in command
     assert "--policy.freeze_vision_encoder=false" in command
     assert "--dataset.eval_split=0.1" in command
+    assert '--rename_map={"observation.images.front":"observation.images.camera1"}' in command
 
 
 def test_resume_command_uses_checkpoint_config(tmp_path: Path) -> None:
@@ -22,4 +23,3 @@ def test_resume_command_uses_checkpoint_config(tmp_path: Path) -> None:
     command = build_train_command(TrainConfig(), output_dir=tmp_path, resume_config=resume)
     assert "--resume=true" in command
     assert not any(item.startswith("--policy.path=") for item in command)
-

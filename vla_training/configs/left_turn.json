@@ -19,6 +19,8 @@
   "freeze_vision_encoder": false,
   "train_expert_only": false,
   "image_augmentation": true,
-  "push_to_hub": true
+  "push_to_hub": true,
+  "rename_map": {
+    "observation.images.front": "observation.images.camera1"
+  }
 }
-

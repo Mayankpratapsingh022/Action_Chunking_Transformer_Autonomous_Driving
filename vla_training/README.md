@@ -24,6 +24,8 @@ The default configuration:
 | Held-out episodes | 10% |
 | Vision encoder | Trainable |
 
+The converter keeps the descriptive dataset key `observation.images.front`. During fine-tuning, LeRobot maps it to the pretrained SmolVLA camera slot `observation.images.camera1`; the saved preprocessor retains that mapping for evaluation and inference.
+
 ## Environment
 
 Use Python 3.11 or 3.12. FFmpeg is required for LeRobot video datasets.

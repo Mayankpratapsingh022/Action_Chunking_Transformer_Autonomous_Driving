@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +29,9 @@ class TrainConfig:
     train_expert_only: bool = False
     image_augmentation: bool = True
     push_to_hub: bool = True
+    rename_map: dict[str, str] = field(
+        default_factory=lambda: {"observation.images.front": "observation.images.camera1"}
+    )
 
     @classmethod
     def from_json(cls, path: str | Path) -> TrainConfig:
@@ -50,6 +53,8 @@ class TrainConfig:
         for name in ("dataset_repo", "model_repo", "base_model", "run_name"):
             if not getattr(self, name).strip():
                 raise ValueError(f"{name} must not be empty")
+        if any(not source.strip() or not destination.strip() for source, destination in self.rename_map.items()):
+            raise ValueError("rename_map keys and values must be non-empty")
         if self.steps < 1 or self.batch_size < 1 or self.num_workers < 0:
             raise ValueError("steps and batch_size must be positive; num_workers cannot be negative")
         if not 0 < self.eval_split < 0.5:

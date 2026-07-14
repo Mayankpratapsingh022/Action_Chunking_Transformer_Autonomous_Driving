@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from left_turn_vla.config import TrainConfig
@@ -20,6 +21,9 @@ def build_train_command(
         command.append(f"--policy.path={config.base_model}")
     else:
         command.extend(("--resume=true", f"--config_path={Path(resume_config).expanduser().resolve()}"))
+
+    if config.rename_map:
+        command.append(f"--rename_map={json.dumps(config.rename_map, separators=(',', ':'))}")
 
     command.extend(
         [
