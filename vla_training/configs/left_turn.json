@@ -1,8 +1,8 @@
 {
-  "dataset_repo": "Mayank022/urban-vla-left-turn-human",
-  "model_repo": "Mayank022/urban-vla-left-turn-smolvla",
+  "dataset_repo": "Mayank022/urban-vla-left-turn-cruise-human",
+  "model_repo": "Mayank022/urban-vla-left-turn-smolvla-v2",
   "base_model": "lerobot/smolvla_base",
-  "run_name": "smolvla-left-turn-v1",
+  "run_name": "smolvla-left-turn-v2",
   "seed": 42,
   "fps": 10,
   "video_backend": "pyav",

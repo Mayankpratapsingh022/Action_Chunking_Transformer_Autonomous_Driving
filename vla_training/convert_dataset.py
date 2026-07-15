@@ -21,9 +21,9 @@ from left_turn_vla.raw_dataset import (  # noqa: E402
     load_episode,
 )
 
-DEFAULT_INPUT_DIR = PROJECT_DIR.parent.parent / "Dataset"
-DEFAULT_OUTPUT_DIR = PROJECT_DIR / "data" / "left-turn-lerobot"
-DEFAULT_REPO_ID = "Mayank022/urban-vla-left-turn-human"
+DEFAULT_INPUT_DIR = PROJECT_DIR.parent.parent / "left-turn-target"
+DEFAULT_OUTPUT_DIR = PROJECT_DIR / "data" / "left-turn-cruise-lerobot"
+DEFAULT_REPO_ID = "Mayank022/urban-vla-left-turn-cruise-human"
 
 
 def parse_args() -> argparse.Namespace:
@@ -36,6 +36,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--include-recovery", action="store_true")
     parser.add_argument("--min-frames", type=int, default=60)
     parser.add_argument("--min-progress", type=float, default=0.95)
+    parser.add_argument("--max-final-lateral-error-m", type=float, default=2.0)
+    parser.add_argument("--max-final-heading-error-rad", type=float, default=0.15)
+    parser.add_argument("--max-stopped-frames", type=int, default=20)
     parser.add_argument("--shuffle-seed", type=int, default=42)
     parser.add_argument("--eval-split", type=float, default=0.1)
     parser.add_argument("--dry-run", action="store_true", help="Inspect and report without writing a dataset.")
@@ -55,21 +58,26 @@ def main() -> None:
         include_recovery=args.include_recovery,
         min_frames=args.min_frames,
         min_progress=args.min_progress,
+        max_final_lateral_error_m=args.max_final_lateral_error_m,
+        max_final_heading_error_rad=args.max_final_heading_error_rad,
+        max_stopped_frames=args.max_stopped_frames,
         shuffle_seed=args.shuffle_seed,
         eval_split=args.eval_split,
     )
     print(json.dumps({key: value for key, value in report.items() if key != "episodes"}, indent=2), flush=True)
 
     accepted = accepted_sources(inspections)
-    if not accepted:
-        raise RuntimeError("No episodes passed the conversion filters")
     if args.dry_run:
         rejected = [item for item in report["episodes"] if not item["accepted"]]
         if rejected:
             print(f"Rejected episodes: {len(rejected)}", flush=True)
             for item in rejected[:20]:
                 print(f"  {item['source']}: {item['rejection_reason']}", flush=True)
+        if not accepted:
+            print("No vla-urban-4 target-action episodes have passed yet.", flush=True)
         return
+    if not accepted:
+        raise RuntimeError("No vla-urban-4 target-action episodes passed the conversion filters")
 
     if output_dir.exists():
         if not args.overwrite:

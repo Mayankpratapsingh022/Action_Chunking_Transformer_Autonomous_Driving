@@ -11,14 +11,14 @@ import numpy as np
 PROJECT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_DIR / "src"))
 
-from left_turn_vla.constants import ACTION_NAMES  # noqa: E402
+from left_turn_vla.constants import ACTION_NAMES, MAX_SPEED_MPS  # noqa: E402
 from left_turn_vla.inference import SmolVLADriver  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate a left-turn SmolVLA checkpoint on held-out episodes.")
     parser.add_argument("--model-path", required=True)
-    parser.add_argument("--dataset-repo", default="Mayank022/urban-vla-left-turn-human")
+    parser.add_argument("--dataset-repo", default="Mayank022/urban-vla-left-turn-cruise-human")
     parser.add_argument("--dataset-root")
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--eval-split", type=float, default=0.1)
@@ -104,30 +104,28 @@ def main() -> None:
 def calculate_metrics(targets: np.ndarray, predictions: np.ndarray) -> dict[str, object]:
     targets = np.asarray(targets, dtype=np.float64)
     predictions = np.asarray(predictions, dtype=np.float64)
-    if targets.shape != predictions.shape or targets.ndim != 2 or targets.shape[1] != 3:
-        raise ValueError("targets and predictions must both have shape [frames, 3]")
+    if targets.shape != predictions.shape or targets.ndim != 2 or targets.shape[1] != len(ACTION_NAMES):
+        raise ValueError(f"targets and predictions must both have shape [frames, {len(ACTION_NAMES)}]")
     error = predictions - targets
     absolute = np.abs(error)
     mae = absolute.mean(axis=0)
     rmse = np.sqrt(np.square(error).mean(axis=0))
-    active = {
-        name: _activity_metrics(targets[:, index], predictions[:, index])
-        for index, name in enumerate(ACTION_NAMES[:2])
-    }
-    steering_mask = np.abs(targets[:, 2]) > 0.1
+    normalized_absolute = absolute.copy()
+    normalized_absolute[:, 0] /= MAX_SPEED_MPS
+    active = {"target_speed_mps": _activity_metrics(targets[:, 0], predictions[:, 0], threshold=0.5)}
+    steering_mask = np.abs(targets[:, 1]) > 0.1
     steering_direction_accuracy = (
-        float((np.sign(targets[steering_mask, 2]) == np.sign(predictions[steering_mask, 2])).mean())
+        float((np.sign(targets[steering_mask, 1]) == np.sign(predictions[steering_mask, 1])).mean())
         if steering_mask.any()
         else 1.0
     )
-    overlap = float(((predictions[:, 0] > 0.05) & (predictions[:, 1] > 0.05)).mean())
     return {
-        "mean_action_mae": float(mae.mean()),
+        "mean_action_mae": float(normalized_absolute.mean()),
         "action_mae": {name: float(mae[index]) for index, name in enumerate(ACTION_NAMES)},
         "action_rmse": {name: float(rmse[index]) for index, name in enumerate(ACTION_NAMES)},
         "activity": active,
         "steering_direction_accuracy": steering_direction_accuracy,
-        "throttle_brake_overlap_rate": overlap,
+        "stopped_target_rate": float((predictions[:, 0] < 0.5).mean()),
     }
 
 
@@ -136,12 +134,11 @@ def quality_gates(metrics: dict[str, object]) -> dict[str, bool]:
     activity = metrics["activity"]
     assert isinstance(action_mae, dict) and isinstance(activity, dict)
     gates = {
-        "mean_action_mae": float(metrics["mean_action_mae"]) < 0.12,
-        "throttle_mae": float(action_mae["throttle"]) < 0.15,
-        "steering_mae": float(action_mae["steering"]) < 0.15,
-        "throttle_recall": float(activity["throttle"]["recall"]) >= 0.70,
-        "steering_direction_accuracy": float(metrics["steering_direction_accuracy"]) >= 0.65,
-        "throttle_brake_overlap_rate": float(metrics["throttle_brake_overlap_rate"]) <= 0.02,
+        "mean_action_mae": float(metrics["mean_action_mae"]) < 0.10,
+        "target_speed_mae": float(action_mae["target_speed_mps"]) < 1.5,
+        "target_steering_mae": float(action_mae["target_steering"]) < 0.15,
+        "target_speed_recall": float(activity["target_speed_mps"]["recall"]) >= 0.80,
+        "steering_direction_accuracy": float(metrics["steering_direction_accuracy"]) >= 0.70,
     }
     gates["all_open_loop_passed"] = all(gates.values())
     return gates
@@ -165,19 +162,20 @@ def write_plots(targets: np.ndarray, predictions: np.ndarray, output_dir: Path) 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    figure, axes = plt.subplots(1, 3, figsize=(13, 4))
-    for index, (axis, name) in enumerate(zip(axes, ACTION_NAMES, strict=True)):
+    figure, axes = plt.subplots(1, len(ACTION_NAMES), figsize=(10, 4))
+    for index, (axis, name) in enumerate(zip(np.atleast_1d(axes), ACTION_NAMES, strict=True)):
         axis.scatter(targets[:, index], predictions[:, index], s=5, alpha=0.25)
-        low = -1.0 if name == "steering" else 0.0
-        axis.plot([low, 1.0], [low, 1.0], color="black", linewidth=1)
-        axis.set(title=name, xlabel="human target", ylabel="VLA prediction", xlim=(low, 1), ylim=(low, 1))
+        low = -1.0 if name == "target_steering" else 0.0
+        high = 1.0 if name == "target_steering" else max(12.0, float(targets[:, index].max()))
+        axis.plot([low, high], [low, high], color="black", linewidth=1)
+        axis.set(title=name, xlabel="human target", ylabel="VLA prediction", xlim=(low, high), ylim=(low, high))
         axis.grid(alpha=0.2)
     figure.tight_layout()
     figure.savefig(output_dir / "prediction_scatter.png", dpi=160)
     plt.close(figure)
 
     count = min(300, len(targets))
-    figure, axes = plt.subplots(3, 1, figsize=(11, 7), sharex=True)
+    figure, axes = plt.subplots(len(ACTION_NAMES), 1, figsize=(11, 5), sharex=True)
     for index, (axis, name) in enumerate(zip(axes, ACTION_NAMES, strict=True)):
         axis.plot(targets[:count, index], label="human", linewidth=1.4)
         axis.plot(predictions[:count, index], label="SmolVLA", linewidth=1.1, alpha=0.85)

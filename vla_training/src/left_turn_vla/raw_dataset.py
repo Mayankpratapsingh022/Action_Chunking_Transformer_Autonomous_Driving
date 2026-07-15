@@ -33,6 +33,9 @@ class EpisodeInspection:
     seed: int | None
     frames: int
     max_route_progress: float
+    final_lateral_error_m: float
+    final_heading_error_rad: float
+    stopped_frames: int
     collision: bool
     off_route: bool
     red_light_violation: bool
@@ -69,7 +72,15 @@ def load_episode(path: str | Path) -> dict[str, Any]:
     return payload
 
 
-def inspect_episode(path: str | Path, *, min_frames: int = 60, min_progress: float = 0.95) -> EpisodeInspection:
+def inspect_episode(
+    path: str | Path,
+    *,
+    min_frames: int = 60,
+    min_progress: float = 0.95,
+    max_final_lateral_error_m: float = 2.0,
+    max_final_heading_error_rad: float = 0.15,
+    max_stopped_frames: int = 20,
+) -> EpisodeInspection:
     source = Path(path)
     payload = load_episode(source)
     samples = payload["samples"]
@@ -78,12 +89,33 @@ def inspect_episode(path: str | Path, *, min_frames: int = 60, min_progress: flo
     collision = any(bool(sample.get("events", {}).get("collision")) for sample in samples)
     off_route = any(bool(sample.get("events", {}).get("offRoute")) for sample in samples)
     red_light = any(bool(sample.get("events", {}).get("redLightViolation")) for sample in samples)
+    final_route_state = samples[-1].get("route_state", {}) if samples else {}
+    try:
+        final_lateral_error_m = abs(float(final_route_state.get("lateralErrorM", math.inf)))
+        final_heading_error_rad = abs(float(final_route_state.get("headingErrorRad", math.inf)))
+    except (TypeError, ValueError):
+        final_lateral_error_m = math.inf
+        final_heading_error_rad = math.inf
+    stopped_frames = sum(
+        _target_speed_mps(sample) <= 0.05
+        for sample in samples
+    )
 
     reasons: list[str] = []
+    if payload.get("metadata", {}).get("schema_version") != "vla-urban-4":
+        reasons.append("requires vla-urban-4 target-control schema")
+    if payload.get("metadata", {}).get("action_encoding") != "target_speed_steering":
+        reasons.append("requires target_speed_steering action encoding")
     if len(samples) < min_frames:
         reasons.append(f"fewer than {min_frames} frames")
     if max(progress, default=0.0) < min_progress:
         reasons.append(f"route progress below {min_progress:.2f}")
+    if final_lateral_error_m > max_final_lateral_error_m:
+        reasons.append(f"final lateral error above {max_final_lateral_error_m:.2f} m")
+    if final_heading_error_rad > max_final_heading_error_rad:
+        reasons.append(f"final heading error above {max_final_heading_error_rad:.3f} rad")
+    if stopped_frames > max_stopped_frames:
+        reasons.append(f"more than {max_stopped_frames} stopped frames")
     if samples:
         bad_intents = [
             sample
@@ -105,6 +137,9 @@ def inspect_episode(path: str | Path, *, min_frames: int = 60, min_progress: flo
         seed=int(seed) if isinstance(seed, (int, float)) else None,
         frames=len(samples),
         max_route_progress=max(progress, default=0.0),
+        final_lateral_error_m=final_lateral_error_m,
+        final_heading_error_rad=final_heading_error_rad,
+        stopped_frames=stopped_frames,
         collision=collision,
         off_route=off_route,
         red_light_violation=red_light,
@@ -120,6 +155,9 @@ def analyze_directory(
     include_recovery: bool = False,
     min_frames: int = 60,
     min_progress: float = 0.95,
+    max_final_lateral_error_m: float = 2.0,
+    max_final_heading_error_rad: float = 0.15,
+    max_stopped_frames: int = 20,
     shuffle_seed: int = 42,
     eval_split: float = 0.1,
 ) -> tuple[list[EpisodeInspection], dict[str, Any]]:
@@ -132,13 +170,23 @@ def analyze_directory(
 
     for path in files:
         try:
-            item = inspect_episode(path, min_frames=min_frames, min_progress=min_progress)
+            item = inspect_episode(
+                path,
+                min_frames=min_frames,
+                min_progress=min_progress,
+                max_final_lateral_error_m=max_final_lateral_error_m,
+                max_final_heading_error_rad=max_final_heading_error_rad,
+                max_stopped_frames=max_stopped_frames,
+            )
         except ValueError as error:
             item = EpisodeInspection(
                 source=path.name,
                 seed=None,
                 frames=0,
                 max_route_progress=0.0,
+                final_lateral_error_m=math.inf,
+                final_heading_error_rad=math.inf,
+                stopped_frames=0,
                 collision=False,
                 off_route=False,
                 red_light_violation=False,
@@ -174,6 +222,9 @@ def analyze_directory(
         "include_recovery": include_recovery,
         "min_frames": min_frames,
         "min_progress": min_progress,
+        "max_final_lateral_error_m": max_final_lateral_error_m,
+        "max_final_heading_error_rad": max_final_heading_error_rad,
+        "max_stopped_frames": max_stopped_frames,
         "shuffle_seed": shuffle_seed,
         "eval_split": eval_split,
         "held_out_episodes": len(held_out),
@@ -188,10 +239,10 @@ def analyze_directory(
 
 
 def iter_lerobot_frames(payload: dict[str, Any]) -> Iterator[dict[str, Any]]:
-    previous_throttle = 0.0
-    previous_brake = 0.0
+    previous_target_speed = 0.0
+    previous_target_steering = 0.0
     for sample in payload["samples"]:
-        control = sample["control"]
+        control_target = sample["control_target"]
         ego = sample["ego"]
         yield {
             CAMERA_KEY: decode_image_data_url(sample["image"]),
@@ -199,19 +250,22 @@ def iter_lerobot_frames(payload: dict[str, Any]) -> Iterator[dict[str, Any]]:
                 [
                     float(ego["speed"]) * MAX_SPEED_MPS,
                     float(ego["steering"]),
-                    previous_throttle,
-                    previous_brake,
+                    previous_target_speed,
+                    previous_target_steering,
                 ],
                 dtype=np.float32,
             ),
             ACTION_KEY: np.asarray(
-                [float(control["throttle"]), float(control["brake"]), float(control["steer"])],
+                [
+                    float(control_target["targetSpeedMps"]),
+                    float(control_target["targetSteer"]),
+                ],
                 dtype=np.float32,
             ),
             "task": LEFT_TURN_INSTRUCTION,
         }
-        previous_throttle = float(control["throttle"])
-        previous_brake = float(control["brake"])
+        previous_target_speed = float(control_target["targetSpeedMps"])
+        previous_target_steering = float(control_target["targetSteer"])
 
 
 def decode_image_data_url(value: str) -> np.ndarray:
@@ -274,22 +328,36 @@ def _episode_fingerprint(samples: list[dict[str, Any]]) -> str:
     digest = hashlib.sha256()
     for sample in samples:
         digest.update(str(sample.get("image", "")).encode())
-        digest.update(json.dumps(sample.get("control", {}), sort_keys=True, separators=(",", ":")).encode())
+        digest.update(json.dumps(sample.get("control_target", {}), sort_keys=True, separators=(",", ":")).encode())
         digest.update(json.dumps(sample.get("ego", {}), sort_keys=True, separators=(",", ":")).encode())
     return digest.hexdigest() if samples else ""
+
+
+def _target_speed_mps(sample: dict[str, Any]) -> float:
+    try:
+        return float(sample.get("control_target", {}).get("targetSpeedMps", math.inf))
+    except (TypeError, ValueError):
+        return math.inf
 
 
 def _valid_sample(sample: dict[str, Any]) -> bool:
     try:
         image = sample["image"]
         control = sample["control"]
+        control_target = sample["control_target"]
         ego = sample["ego"]
+        route_state = sample["route_state"]
         values = (
             float(control["throttle"]),
             float(control["brake"]),
             float(control["steer"]),
             float(ego["speed"]),
             float(ego["steering"]),
+            float(control_target["targetSpeedMps"]),
+            float(control_target["targetSteer"]),
+            float(route_state["progress"]),
+            float(route_state["lateralErrorM"]),
+            float(route_state["headingErrorRad"]),
         )
     except (KeyError, TypeError, ValueError):
         return False
@@ -300,6 +368,11 @@ def _valid_sample(sample: dict[str, Any]) -> bool:
         and 0.0 <= values[0] <= 1.0
         and 0.0 <= values[1] <= 1.0
         and -1.0 <= values[2] <= 1.0
+        and 0.0 <= values[5] <= MAX_SPEED_MPS
+        and -1.0 <= values[6] <= 1.0
+        and 0.0 <= values[7] <= 1.0
+        and control_target.get("mode")
+        in {"stopped", "cruise", "turn_left", "turn_right", "straighten", "emergency_stop"}
     )
 
 
@@ -313,12 +386,19 @@ def lerobot_features() -> dict[str, dict[str, Any]]:
         STATE_KEY: {
             "dtype": "float32",
             "shape": (4,),
-            "names": {"vehicle": ["speed_mps", "steering", "previous_throttle", "previous_brake"]},
+            "names": {
+                "vehicle": [
+                    "speed_mps",
+                    "steering",
+                    "previous_target_speed_mps",
+                    "previous_target_steering",
+                ]
+            },
         },
         ACTION_KEY: {
             "dtype": "float32",
-            "shape": (3,),
-            "names": {"driving": ["throttle", "brake", "steering"]},
+            "shape": (2,),
+            "names": {"driving": ["target_speed_mps", "target_steering"]},
         },
     }
 

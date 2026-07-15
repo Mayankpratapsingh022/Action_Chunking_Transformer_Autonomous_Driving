@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SESSION_NAME="${TMUX_SESSION_NAME:-smolvla-left-turn}"
-RUN_NAME="${VLA_RUN_NAME:-smolvla-left-turn-v1}"
+RUN_NAME="${VLA_RUN_NAME:-smolvla-left-turn-v2}"
 MAX_STEPS="${VLA_MAX_STEPS:-20000}"
 BATCH_SIZE="${VLA_BATCH_SIZE:-32}"
 WORKSPACE_ROOT="${VLA_WORKSPACE_ROOT:-/workspace/vla-driving}"
@@ -36,4 +36,3 @@ tmux new-session -d -s "$SESSION_NAME" -c "$ROOT_DIR" \
 echo "Started: $SESSION_NAME"
 echo "Attach:  tmux attach -t $SESSION_NAME"
 echo "Log:     tail -F $LOG_FILE"
-

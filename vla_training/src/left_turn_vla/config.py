@@ -8,10 +8,10 @@ from typing import Any
 
 @dataclass(slots=True)
 class TrainConfig:
-    dataset_repo: str = "Mayank022/urban-vla-left-turn-human"
-    model_repo: str = "Mayank022/urban-vla-left-turn-smolvla"
+    dataset_repo: str = "Mayank022/urban-vla-left-turn-cruise-human"
+    model_repo: str = "Mayank022/urban-vla-left-turn-smolvla-v2"
     base_model: str = "lerobot/smolvla_base"
-    run_name: str = "smolvla-left-turn-v1"
+    run_name: str = "smolvla-left-turn-v2"
     seed: int = 42
     fps: int = 10
     video_backend: str = "pyav"

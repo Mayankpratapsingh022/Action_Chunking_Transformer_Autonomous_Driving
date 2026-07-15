@@ -1,30 +1,30 @@
 # Left-Turn SmolVLA Training
 
-This folder converts the manually recorded left-turn episodes into LeRobot v3, fine-tunes [`lerobot/smolvla_base`](https://huggingface.co/lerobot/smolvla_base), evaluates the held-out actions, and serves the resulting policy to the browser simulator.
+This folder converts `vla-urban-4` target-action left-turn episodes into LeRobot v3, fine-tunes [`lerobot/smolvla_base`](https://huggingface.co/lerobot/smolvla_base), evaluates held-out actions, and serves the resulting policy to the browser simulator.
 
 The code pins LeRobot `0.6.0`. That matters because dataset writing, processor files, resume behavior, and training arguments have changed across LeRobot releases.
 
 ## Why SmolVLA
 
-SmolVLA is a 450M-parameter open VLA with a pretrained vision-language backbone and a flow-matching action expert. It accepts camera images, state, and language, then emits continuous action chunks. Hugging Face documents roughly 50 task demonstrations as a starting point. This dataset has 127 clean left-turn episodes after filtering, so it is large enough to justify a fine-tuning run, though closed-loop performance still has to be measured.
+SmolVLA is a 450M-parameter open VLA with a pretrained vision-language backbone and a flow-matching action expert. It accepts camera images, state, and language, then emits continuous action chunks. The fresh dataset has 204 curated left-turn episodes and 39,417 frames after filtering, so it is large enough to justify a fine-tuning run, though closed-loop performance still has to be measured.
 
 The default configuration:
 
 | Setting | Value |
 | --- | ---: |
 | Base checkpoint | `lerobot/smolvla_base` |
-| Clean episodes | 127 |
+| Clean episodes | 204 |
 | Camera | Front RGB, `128 x 128` |
 | State dimension | 4 |
-| Action dimension | 3 |
+| Action dimension | 2 (`target_speed_mps`, `target_steering`) |
 | Chunk size | 20 actions |
 | Actions executed before replanning | 3 |
 | Optimizer steps | 20,000 |
 | Batch size | 32 |
-| Held-out episodes | 10% |
+| Held-out episodes | 21, seed-disjoint |
 | Vision encoder | Trainable |
 
-The converter keeps the descriptive dataset key `observation.images.front`. During fine-tuning, LeRobot maps it to the pretrained SmolVLA camera slot `observation.images.camera1`; the saved preprocessor retains that mapping for evaluation and inference.
+The state is `[speed_mps, steering, previous_target_speed_mps, previous_target_steering]`. Steering uses the simulator convention: negative is left and positive is right. The converter keeps the descriptive dataset key `observation.images.front`. During fine-tuning, LeRobot maps it to the pretrained SmolVLA camera slot `observation.images.camera1`; the saved preprocessor retains that mapping for evaluation and inference.
 Video decoding is pinned to PyAV for training and held-out evaluation so the run does not depend on the Pod image's TorchCodec and FFmpeg ABI combination.
 
 ## Environment
@@ -49,8 +49,7 @@ Optional variables are `HF_DATASET_REPO`, `HF_MODEL_REPO`, `WANDB_API_KEY`, `WAN
 
 ## Convert the human recordings
 
-The converter reads the sibling `Dataset/` folder by default. It considers only `human-*.json` files. The older cumulative exports are intentionally ignored.
-It orders the converted episodes so LeRobot's final 10% holdout uses simulator seeds that never appear in training.
+The converter reads the repository's sibling `../left-turn-target/` folder by default and considers only `human-*.json` files. It reviewed 322 source episodes, accepted 204, rejected 118, and left every raw file untouched. It orders the accepted episodes so LeRobot's final 10% holdout contains 21 episodes whose simulator seeds never appear in training.
 
 Review the selection:
 
@@ -64,10 +63,12 @@ Write and publish the clean dataset:
 python convert_dataset.py \
   --overwrite \
   --push-to-hub \
-  --repo-id Mayank022/urban-vla-left-turn-human
+  --repo-id Mayank022/urban-vla-left-turn-cruise-human
 ```
 
-Do not add `--include-recovery` for the first nominal run. Collision and off-road episodes can be useful later, but only after checking that the actions following the disturbance are actual recoveries.
+The converter rejects old `vla-urban-3` raw-pedal recordings. Its nominal gates also reject collisions, off-route runs, exact duplicates, incomplete routes, poorly aligned finishes, and episodes with excessive stopped frames. Do not add `--include-recovery` for the first nominal run. Recovery episodes can be added later only as separately reviewed, continuous human corrections with no teleport or reset inside the episode.
+
+The converted release is public at [`Mayank022/urban-vla-left-turn-cruise-human`](https://huggingface.co/datasets/Mayank022/urban-vla-left-turn-cruise-human).
 
 ## Inspect the training command
 
@@ -111,7 +112,7 @@ Detach with `Ctrl+B`, then `D`. The process keeps running.
 Monitor the persistent log:
 
 ```bash
-tail -F /workspace/vla-driving/logs/smolvla-left-turn-v1-launcher.log
+tail -F /workspace/vla-driving/logs/smolvla-left-turn-v2-launcher.log
 ```
 
 Check whether the process still exists:
@@ -147,8 +148,8 @@ For the default run:
 
 ```text
 /workspace/vla-driving/
-|-- logs/smolvla-left-turn-v1.log
-`-- runs/smolvla-left-turn-v1/
+|-- logs/smolvla-left-turn-v2.log
+`-- runs/smolvla-left-turn-v2/
     |-- checkpoints/
     `-- run_artifacts/
         |-- run_manifest.json
@@ -170,9 +171,9 @@ Run it separately when needed:
 
 ```bash
 python evaluate.py \
-  --model-path /workspace/vla-driving/runs/smolvla-left-turn-v1/checkpoints/last/pretrained_model \
-  --dataset-repo Mayank022/urban-vla-left-turn-human \
-  --output-dir /workspace/vla-driving/runs/smolvla-left-turn-v1/run_artifacts/evaluation \
+  --model-path /workspace/vla-driving/runs/smolvla-left-turn-v2/checkpoints/last/pretrained_model \
+  --dataset-repo Mayank022/urban-vla-left-turn-cruise-human \
+  --output-dir /workspace/vla-driving/runs/smolvla-left-turn-v2/run_artifacts/evaluation \
   --device cuda
 ```
 
@@ -189,10 +190,10 @@ python scripts/download_model.py
 Start the server from the repository root:
 
 ```bash
-npm run inference -- --model-path vla_training/artifacts/smolvla-left-turn-v1
+npm run inference -- --model-path vla_training/artifacts/smolvla-left-turn-v2 --action-steps 1
 ```
 
-Start the simulator separately with `npm run dev`, select the left-turn intent, and press `I`.
+Start the simulator separately with `npm run dev`, select the left-turn intent, and press `I`. Inference reads the learned normalizer shapes rather than the base checkpoint's generic feature metadata. It supports both the legacy `[throttle, brake, steering]` checkpoint and the current `[target_speed_mps, target_steering]` checkpoint, and the browser waits for that contract before sending its first frame. The server also translates the legacy checkpoint's positive-left steering to the current negative-left simulator convention in both observations and actions. `--action-steps 1` is the closed-loop default; it makes SmolVLA replan on every request instead of executing three stale actions from its queue.
 
 ## Tests
 
@@ -203,4 +204,4 @@ PYTHONPATH=src python -m pytest
 python -m compileall src convert_dataset.py train.py evaluate.py inference_server.py runpod_main.py
 ```
 
-They cover raw episode filtering, duplicate-safe dataset selection, unit conversion, previous-control alignment, training and resume command construction, metric parsing, and the browser request/action contract.
+They cover raw episode filtering, schema isolation, duplicate-safe dataset selection, unit conversion, previous-target alignment, training and resume command construction, metric parsing, and both browser action protocols.

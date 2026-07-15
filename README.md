@@ -4,7 +4,7 @@ This repository pairs a Three.js driving simulator with a focused vision-languag
 
 ![Autonomous-driving rollout with the model camera and live VLA action vector](docs/images/vla-driving-observation-actions.gif)
 
-The policy is fine-tuned from Hugging Face's open [`lerobot/smolvla_base`](https://huggingface.co/lerobot/smolvla_base) checkpoint. SmolVLA reads the front camera, vehicle state, and instruction, then produces a continuous chunk of throttle, brake, and steering actions. The implementation follows the official [LeRobot SmolVLA workflow](https://huggingface.co/docs/lerobot/smolvla).
+The policy is fine-tuned from Hugging Face's open [`lerobot/smolvla_base`](https://huggingface.co/lerobot/smolvla_base) checkpoint. SmolVLA reads the front camera, vehicle state, and instruction, then produces a chunk of target-speed and target-steering actions. A deterministic low-level controller turns those targets into throttle and brake commands. The implementation follows the official [LeRobot SmolVLA workflow](https://huggingface.co/docs/lerobot/smolvla).
 
 ## Current status
 
@@ -12,15 +12,15 @@ The policy is fine-tuned from Hugging Face's open [`lerobot/smolvla_base`](https
 | --- | --- |
 | Three.js driving simulator | Working |
 | Automatic human episode saving | Working |
-| Independent left-turn demonstrations | 156 collected |
-| Clean demonstrations selected for training | 127 episodes, 14,060 frames |
-| LeRobot v3 converter | Implemented |
+| Legacy raw-pedal left-turn demonstrations | 127 clean episodes, retained separately |
+| Fresh target-action human collection | 204 curated episodes, 39,417 frames |
+| LeRobot v3 dataset | [Published on Hugging Face](https://huggingface.co/datasets/Mayank022/urban-vla-left-turn-cruise-human) |
 | SmolVLA fine-tuning on RunPod | Ready, not launched from this revision |
 | Held-out offline evaluation and plots | Implemented |
 | Browser WebSocket inference | Implemented |
 | Closed-loop checkpoint evaluation | Waiting for the new checkpoint |
 
-The dataset size is reasonable for a first single-task fine-tune. LeRobot's SmolVLA guide suggests roughly 50 demonstrations as a starting point and warns that variation matters. This project has more demonstrations and 91 clean simulator seeds, but a successful training loss still does not guarantee stable closed-loop driving.
+The earlier 127-episode dataset remains a reference, but the converter rejects it because it encodes raw pedals and overwhelmingly contains full-throttle driving. The new release contains only `vla-urban-4` target-speed and target-steering demonstrations. Keeping the contracts separate prevents normalization statistics and action semantics from being mixed.
 
 ## Project flow
 
@@ -56,28 +56,21 @@ Every training frame and live inference request uses the same fields:
 
 ```text
 camera:       128 x 128 front RGB image
-state:        [speed_mps, steering, previous_throttle, previous_brake]
+state:        [speed_mps, steering, previous_target_speed_mps, previous_target_steering]
 instruction:  "Proceed through the city and make the protected left turn at the main intersection."
-action:       [throttle, brake, steering]
+action:       [target_speed_mps, target_steering]
 rate:         10 Hz
 ```
 
-The raw recorder stores speed normalized to the simulator's 24 m/s limit. The converter restores metres per second before writing `observation.state`; this keeps training aligned with the browser's live state. The model predicts 20 future actions and executes three before replanning from a new image.
+The raw recorder stores speed normalized to the simulator's 24 m/s limit. The converter restores metres per second before writing `observation.state`; this keeps training aligned with the browser's live state. Raw throttle and brake are retained only for diagnostics. Each frame also records route progress, signed lateral error, and heading error for dataset review. The model predicts 20 future targets; live inference executes one target before replanning from a new image.
 
 Only the front camera is used. The bird's-eye image remains in the raw recording for inspection but is intentionally excluded from training because it is not an onboard sensor and the live policy should not depend on it.
 
 ## Dataset selection
 
-The top-level `Dataset/` folder currently contains:
+The fresh collection lives in the repository's sibling `../left-turn-target/` folder; the raw files remain untouched. The converter reviewed all 322 independent `human-*.json` episodes and accepted 204 episodes with 39,417 frames and 152 unique simulator seeds. It rejected 118 episodes automatically rather than requiring manual sorting.
 
-- 156 independent files named `human-*.json`
-- 17,547 recorded frames
-- 127 clean nominal episodes
-- 29 episodes containing a collision or off-route event
-- 57 old cumulative exports named `vla_urban_dataset_*.json`
-
-The converter ignores all cumulative exports. By default it also excludes collision and off-route episodes from nominal imitation, checks the instruction and image shape, rejects exact duplicates, requires at least 60 frames, and requires route progress of at least 95%.
-It places a seed-disjoint set of episodes in the final 10% of the dataset, matching LeRobot's holdout convention without leaking the same simulator seed into training and validation.
+The default gates require the `vla-urban-4` schema, `target_speed_steering` actions, 128 x 128 images, at least 60 frames, at least 95% route progress, no collision or off-route flag, no exact duplicate, final lateral error no greater than 2 m, final heading error no greater than 0.15 rad, and no more than 20 stopped frames. The converter places 21 seed-disjoint episodes at the end of the dataset for LeRobot's 10% holdout, preventing the same simulator seed from appearing in training and validation.
 
 Inspect the selection without writing anything:
 
@@ -97,10 +90,10 @@ python -m pip install -e .
 python convert_dataset.py \
   --overwrite \
   --push-to-hub \
-  --repo-id Mayank022/urban-vla-left-turn-human
+  --repo-id Mayank022/urban-vla-left-turn-cruise-human
 ```
 
-The generated dataset is written below `vla_training/data/`, which is ignored by Git. A `conversion_report.json` file records every accepted and rejected source episode.
+The generated dataset is written to `vla_training/data/left-turn-cruise-lerobot/`, which is ignored by Git. Its `conversion_report.json` records every accepted and rejected source episode. The public release is [`Mayank022/urban-vla-left-turn-cruise-human`](https://huggingface.co/datasets/Mayank022/urban-vla-left-turn-cruise-human).
 
 ## Run the simulator
 
@@ -111,7 +104,22 @@ npm install
 npm run dev
 ```
 
-Open the URL printed by Vite, normally `http://localhost:5173`. Select the left-turn intent, click **Auto**, choose the `Dataset` folder once, and drive. A successful route saves one independent JSON episode and resets the simulator with the next seed.
+Open the URL printed by Vite, normally `http://localhost:5173`. Click **Collect**, choose the sibling `left-turn-target` folder once, and drive. Collection mode locks the protected-left-turn task to a clear, low-traffic, 128 x 128 preset. It runs the simulation clock at 2x so a demonstration takes about half the wall-clock time, while the recorded target speeds, vehicle dynamics, timestamps, and 10 Hz sample rate remain in normal simulated time. Inference and ordinary driving remain at 1x. The traffic signal stays green for this protected movement. A valid route saves one independent JSON episode and resets the simulator with the next seed.
+
+Collection mode does not repair a failed trajectory. A collision or severe route departure stops the attempt, clears its buffered frames and video, and returns the car to the original start. It never teleports the car forward on the route. A drive is saved only when it contains at least 80 samples and reaches the destination aligned with the highlighted exit lane.
+
+The manual controls are designed around the same action chunks the VLA learns:
+
+| Input | Behavior |
+| --- | --- |
+| Tap `Up` or `W` once | Latch cruise at `24 m/s` |
+| Hold `Left` or `A` | Steer left smoothly and lower the target to `18 m/s` |
+| Hold `Right` or `D` | Steer right with matching intensity and lower the target to `18 m/s` |
+| Release Left or Right | Recenter steering automatically |
+| Tap `Down` or `S` once | Smoothly stop without reversing |
+| Hold `Space` | Emergency stop |
+
+The **Collect** preset uses lower `12 m/s` cruise and `8 m/s` turn targets; the faster values above remain available during ordinary manual driving. For a clean left-turn demonstration, tap Up once, stay centered on the approach, hold Left before the corner begins, and release it as the car aligns with the destination road. Do not pulse Up or hold full throttle; the speed controller handles acceleration and turn speed.
 
 ## Fine-tune on RunPod
 
@@ -138,12 +146,12 @@ tmux attach -t smolvla-left-turn
 Or follow the persistent log from another shell:
 
 ```bash
-tail -F /workspace/vla-driving/logs/smolvla-left-turn-v1-launcher.log
+tail -F /workspace/vla-driving/logs/smolvla-left-turn-v2-launcher.log
 ```
 
 The default run uses 20,000 steps, a batch size of 32, a 10% episode-level validation split, validation every 1,000 steps, and checkpoints every 2,000 steps. Restarting the same command resumes from `checkpoints/last` automatically.
 
-The final model is published to [`Mayank022/urban-vla-left-turn-smolvla`](https://huggingface.co/Mayank022/urban-vla-left-turn-smolvla). Training configuration, processor statistics, evaluation metrics, plots, and the full log are uploaded with it.
+The final model is published to `Mayank022/urban-vla-left-turn-smolvla-v2`. Training configuration, processor statistics, evaluation metrics, plots, and the full log are uploaded with it.
 
 See [vla_training/README.md](vla_training/README.md) for dry runs, overrides, resume behavior, and artifact paths.
 
@@ -163,7 +171,7 @@ cd ..
 Start inference in one terminal:
 
 ```bash
-npm run inference -- --model-path vla_training/artifacts/smolvla-left-turn-v1
+npm run inference -- --model-path vla_training/artifacts/smolvla-left-turn-v2 --action-steps 1
 ```
 
 Start Vite in another:
@@ -174,16 +182,15 @@ npm run dev
 
 Open the simulator and press `I`. The server uses CUDA when available, then Apple MPS, then CPU. It rejects instructions other than the protected left turn because this checkpoint is deliberately single-task.
 
-The readiness endpoint is [`http://localhost:8000/health`](http://localhost:8000/health). With both services running, `npm run smoke:inference` checks the socket and one real prediction. `npm run eval:closed-loop` also requires the vehicle to move.
+The readiness endpoint is [`http://localhost:8000/health`](http://localhost:8000/health). The server verifies the checkpoint's learned normalization tensors, negotiates the legacy three-control or current two-target action contract, and replans after one action by default so a queued chunk cannot delay the turn. Legacy checkpoints are adapted from their original positive-left steering convention to the simulator's current negative-left convention at the server boundary. With both services running, `npm run smoke:inference` checks the socket and one real prediction. `npm run eval:closed-loop` also requires the vehicle to move.
 
 ## Evaluation
 
 The training run measures held-out flow-matching loss. After training, `evaluate.py` replays the held-out episodes through the final policy and saves:
 
-- throttle, brake, and steering MAE and RMSE
-- throttle and brake precision, recall, and F1
+- target-speed and target-steering MAE and RMSE
+- moving-target precision, recall, and F1
 - steering-direction accuracy during active turns
-- simultaneous throttle-and-brake rate
 - per-episode error
 - prediction scatter and action-trace plots
 

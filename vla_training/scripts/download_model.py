@@ -18,9 +18,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Download the fine-tuned SmolVLA checkpoint for local inference.")
     parser.add_argument(
         "--repo-id",
-        default=os.environ.get("HF_MODEL_REPO", "Mayank022/urban-vla-left-turn-smolvla"),
+        default=os.environ.get("HF_MODEL_REPO", "Mayank022/urban-vla-left-turn-smolvla-v2"),
     )
-    parser.add_argument("--output-dir", default=str(PROJECT_DIR / "artifacts" / "smolvla-left-turn-v1"))
+    parser.add_argument("--output-dir", default=str(PROJECT_DIR / "artifacts" / "smolvla-left-turn-v2"))
     args = parser.parse_args()
     output = Path(args.output_dir).expanduser().resolve()
     snapshot_download(
